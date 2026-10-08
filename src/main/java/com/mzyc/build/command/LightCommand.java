@@ -1,0 +1,470 @@
+package com.mzyc.build.command;
+
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
+import com.mzyc.build.LightConfig;
+import com.mzyc.build.LightIndex;
+import net.minecraft.server.command.CommandManager;
+import net.minecraft.server.command.ServerCommandSource;
+import net.minecraft.text.Text;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.ObjIntConsumer;
+import java.util.function.Predicate;
+import java.util.function.ToIntFunction;
+
+/**
+ * 全部调节指令。
+ *
+ * <h2>黄 / 通用（{@code /light …}）</h2>
+ * <ul>
+ *   <li>{@code /light percent X} —— 夜晚点亮比例（%，0~100，默认 30）</li>
+ *   <li>{@code /light light X} —— 灯光亮度（0~15，和原版光源方块同一套语义，默认 12）</li>
+ *   <li>{@code /light delay Y} —— 点亮延迟上限（秒，0~600，默认 60；实际延迟在 0~Y 秒之间随机）</li>
+ *   <li>{@code /light on|off} —— 黄灯总开关（默认开）</li>
+ *   <li>{@code /light h on|off} —— 红灯总开关（默认开）</li>
+ *   <li>{@code /light -f on|off} —— 「全灭」：关掉后黄 / 红一律不亮，无视一切设置，直到 {@code /light -f on}</li>
+ * </ul>
+ *
+ * <h2>红灯（{@code /hlight …}，X 均支持 2 位小数）</h2>
+ * <ul>
+ *   <li>{@code /hlight time on X} —— 亮起时间（默认 2.00 秒）</li>
+ *   <li>{@code /hlight time off X} —— 熄灭时间（默认 2.00 秒）</li>
+ *   <li>{@code /hlight slow on X} —— 灭→亮渐变时间（默认 0.10 秒）</li>
+ *   <li>{@code /hlight slow off X} —— 亮→灭渐变时间（默认 0.10 秒）</li>
+ *   <li>{@code /hlight flex on|off [X]} —— 是否「错开」每块红方块的亮/灭循环起点 + 随机错开时长（默认关 / 4.00 秒）</li>
+ * </ul>
+ *
+ * <h2>黄灯夜间随机重分配（{@code /flex …}）</h2>
+ * <ul>
+ *   <li>{@code /flex on time Y percent X} —— 开：入夜第一次亮灯后每 Y 秒，
+ *       在「本晚被点亮」的灯里熄灭**当前还亮着**的 X%（只灭不亮，越到后半夜越暗；
+ *       剩得不够一盏时一次全灭；X=0 不变、X=100 第 1 轮全灭）</li>
+ *   <li>{@code /flex on time Y} —— 开：每 Y 秒对全部黄灯按 {@code /light percent} 重新分配一次点亮 / 熄灭
+ *       （**有熄灭也有点亮**）</li>
+ *   <li>{@code /flex off} —— 关：一整夜只掷一次骰</li>
+ *   <li>{@code /flex flex X} —— 每块 ±X 秒的固定偏差，避免同一瞬间一起变</li>
+ *   <li>{@code /flex grow X} —— 每轮间隔递增量：第 k 轮间隔 = Y + (k-1)·X；可填负数（60→55→50…）</li>
+ * </ul>
+ *
+ * <p><b>所有写指令都是「立即生效」的</b>：写完当场把全场已加载的灯光方块刷新一遍
+ * （见 {@link com.mzyc.build.LightIndex}），所以 {@code /light -f off} 是**当场**黄+红全灭，
+ * 既不等黄灯 5 tick 节流，也能灭掉超出模拟距离、不会 tick 的方块。
+ *
+ * <p>不带参数的写法都是**查询**，只回当前数值：
+ * <ul>
+ *   <li>{@code /light} → {@code 比例 亮度 延迟 黄开关 红开关 全灭}（如 {@code 30 12 60 1 1 0}）</li>
+ *   <li>{@code /light h}/{@code /light -f} → 开关值 {@code 1}/{@code 0}</li>
+ *   <li>{@code /hlight} → 六个数（开关 错开值 亮起值 熄灭值 渐变亮值 渐变灭值）；
+ *       {@code /hlight flex} → {@code 1 4.00}；{@code /hlight time}/{@code /hlight slow} → {@code 2.00 2.00}</li>
+ *   <li>{@code /flex} → {@code 开关 间隔 熄灭比例 偏差 递增}（如 {@code 1 60.00 50 0.00 0.00}；比例 {@code -1} = 未设）</li>
+ * </ul>
+ *
+ * <p>用户定的铁规矩：<b>指令反馈只回「指令执行成功」/「指令执行失败」，查询只回数值。</b>
+ * 所以这里故意用 {@link StringArgumentType} 自己解析数字 —— 非数字、超范围这些情况
+ * 都能统一回「指令执行失败」，而不是冒出原版的长句报错。
+ */
+public final class LightCommand {
+    /** 指令反馈文案（只此两句，别加长句）。 */
+    private static final Text FEEDBACK_OK = Text.literal("指令执行成功");
+    private static final Text FEEDBACK_FAIL = Text.literal("指令执行失败");
+
+    private LightCommand() {
+    }
+
+    public static void register(CommandDispatcher<ServerCommandSource> dispatcher) {
+        dispatcher.register(buildLight());
+        dispatcher.register(buildHlight());
+        dispatcher.register(buildFlex());
+    }
+
+    // ---------------------------------------------------------------- /light
+
+    private static LiteralArgumentBuilder<ServerCommandSource> buildLight() {
+        return CommandManager.literal("light")
+                // 光秃秃 /light = 查询全部数值
+                .executes(LightCommand::queryLightAll)
+
+                // 黄灯总开关：/light on | /light off
+                .then(CommandManager.literal("on")
+                        .executes(context -> applyBoolean(context, config -> config.setYellowOn(true))))
+                .then(CommandManager.literal("off")
+                        .executes(context -> applyBoolean(context, config -> config.setYellowOn(false))))
+
+                // 红灯总开关：/light h [on|off]
+                .then(CommandManager.literal("h")
+                        .executes(context -> queryBoolean(context, LightConfig::isRedOn))
+                        .then(CommandManager.literal("on")
+                                .executes(context -> applyBoolean(context, config -> config.setRedOn(true))))
+                        .then(CommandManager.literal("off")
+                                .executes(context -> applyBoolean(context, config -> config.setRedOn(false)))))
+
+                // 全灭：/light -f [on|off]
+                .then(CommandManager.literal("-f")
+                        .executes(context -> queryBoolean(context, LightConfig::isForceOff))
+                        .then(CommandManager.literal("on")
+                                .executes(context -> applyBoolean(context, config -> config.setForceOff(true))))
+                        .then(CommandManager.literal("off")
+                                .executes(context -> applyBoolean(context, config -> config.setForceOff(false)))))
+
+                // 整数参数：percent | light | delay
+                .then(intLeaf("percent", LightConfig.MIN_PERCENT, LightConfig.MAX_PERCENT,
+                        LightConfig::getPercent, LightConfig::setPercent))
+                .then(intLeaf("light", LightConfig.MIN_LIGHT_LEVEL, LightConfig.MAX_LIGHT_LEVEL,
+                        LightConfig::getLightLevel, LightConfig::setLightLevel))
+                .then(intLeaf("delay", LightConfig.MIN_DELAY_SECONDS, LightConfig.MAX_DELAY_SECONDS,
+                        LightConfig::getDelaySeconds, LightConfig::setDelaySeconds));
+    }
+
+    // ---------------------------------------------------------------- /hlight
+
+    /** 拼出整棵 {@code /hlight} 指令树。 */
+    private static LiteralArgumentBuilder<ServerCommandSource> buildHlight() {
+        return CommandManager.literal("hlight")
+                .executes(LightCommand::queryHlightAll)
+
+                // /hlight flex [on|off] [X]
+                .then(CommandManager.literal("flex")
+                        .executes(LightCommand::queryRedFlex)
+                        .then(CommandManager.literal("on")
+                                .executes(context -> setRedFlex(context, null, true))
+                                .then(CommandManager.argument("value", StringArgumentType.word())
+                                        .executes(context -> setRedFlex(context,
+                                                StringArgumentType.getString(context, "value"), true))))
+                        .then(CommandManager.literal("off")
+                                .executes(context -> setRedFlex(context, null, false))
+                                .then(CommandManager.argument("value", StringArgumentType.word())
+                                        .executes(context -> setRedFlex(context,
+                                                StringArgumentType.getString(context, "value"), false)))))
+
+                // /hlight time on|off [X]
+                .then(CommandManager.literal("time")
+                        .executes(context -> queryPair(context,
+                                LightConfig::getRedTimeOnCentis, LightConfig::getRedTimeOffCentis))
+                        .then(centisLeaf("on",
+                                LightConfig.MIN_RED_TIME_CENTIS, LightConfig.MAX_RED_CENTIS,
+                                LightConfig::getRedTimeOnCentis, LightConfig::setRedTimeOnCentis))
+                        .then(centisLeaf("off",
+                                LightConfig.MIN_RED_TIME_CENTIS, LightConfig.MAX_RED_CENTIS,
+                                LightConfig::getRedTimeOffCentis, LightConfig::setRedTimeOffCentis)))
+
+                // /hlight slow on|off [X]
+                .then(CommandManager.literal("slow")
+                        .executes(context -> queryPair(context,
+                                LightConfig::getRedSlowOnCentis, LightConfig::getRedSlowOffCentis))
+                        .then(centisLeaf("on",
+                                LightConfig.MIN_RED_SLOW_CENTIS, LightConfig.MAX_RED_CENTIS,
+                                LightConfig::getRedSlowOnCentis, LightConfig::setRedSlowOnCentis))
+                        .then(centisLeaf("off",
+                                LightConfig.MIN_RED_SLOW_CENTIS, LightConfig.MAX_RED_CENTIS,
+                                LightConfig::getRedSlowOffCentis, LightConfig::setRedSlowOffCentis)));
+    }
+
+    // ---------------------------------------------------------------- /flex（黄灯重分配）
+
+    private static LiteralArgumentBuilder<ServerCommandSource> buildFlex() {
+        return CommandManager.literal("flex")
+                // 光秃秃 /flex = 查询：开关 间隔 熄灭比例 偏差 递增
+                .executes(LightCommand::queryFlexAll)
+
+                // /flex on [time Y [percent X]]
+                .then(CommandManager.literal("on")
+                        .executes(context -> setFlexSwitch(context, true))
+                        .then(flexTimeTree(true)))
+                // /flex off [time Y [percent X]]
+                .then(CommandManager.literal("off")
+                        .executes(context -> setFlexSwitch(context, false))
+                        .then(flexTimeTree(false)))
+
+                // /flex flex X —— 偏差
+                .then(CommandManager.literal("flex")
+                        .executes(LightCommand::queryFlexJitter)
+                        .then(CommandManager.argument("X", StringArgumentType.word())
+                                .executes(context -> setFlexJitter(context,
+                                        StringArgumentType.getString(context, "X")))))
+
+                // /flex grow X —— 间隔递增（可负）
+                .then(CommandManager.literal("grow")
+                        .executes(LightCommand::queryFlexGrow)
+                        .then(CommandManager.argument("X", StringArgumentType.word())
+                                .executes(context -> setFlexGrow(context,
+                                        StringArgumentType.getString(context, "X")))));
+    }
+
+    /** 共用的 {@code time Y [percent X]} 子树；{@code enable} 决定最终把总开关设成开还是关。 */
+    private static LiteralArgumentBuilder<ServerCommandSource> flexTimeTree(boolean enable) {
+        return CommandManager.literal("time")
+                .then(CommandManager.argument("Y", StringArgumentType.word())
+                        .executes(context -> applyFlex(context, enable,
+                                StringArgumentType.getString(context, "Y"), null))
+                        .then(CommandManager.literal("percent")
+                                .then(CommandManager.argument("X", StringArgumentType.word())
+                                        .executes(context -> applyFlex(context, enable,
+                                                StringArgumentType.getString(context, "Y"),
+                                                StringArgumentType.getString(context, "X"))))));
+    }
+
+    // ---------------------------------------------------------------- 查询
+
+    /** {@code /light}：回全部数值（比例 亮度 延迟 黄开关 红开关 全灭）。 */
+    private static int queryLightAll(CommandContext<ServerCommandSource> context) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        String value = config.getPercent() + " " + config.getLightLevel() + " " + config.getDelaySeconds()
+                + " " + (config.isYellowOn() ? "1" : "0")
+                + " " + (config.isRedOn() ? "1" : "0")
+                + " " + (config.isForceOff() ? "1" : "0");
+        context.getSource().sendFeedback(() -> Text.literal(value), false);
+        return 1;
+    }
+
+    /** {@code /light h} / {@code /light -f}：回开关值 {@code 1}/{@code 0}。 */
+    private static int queryBoolean(CommandContext<ServerCommandSource> context, Predicate<LightConfig> getter) {
+        boolean on = getter.test(LightConfig.get(context.getSource().getWorld()));
+        context.getSource().sendFeedback(() -> Text.literal(on ? "1" : "0"), false);
+        return 1;
+    }
+
+    /** {@code /hlight}：回全部六个数（开关 错开值 亮起值 熄灭值 渐变亮值 渐变灭值）。 */
+    private static int queryHlightAll(CommandContext<ServerCommandSource> context) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        String value = (config.isRedFlexOn() ? "1 " : "0 ")
+                + LightConfig.formatCentis(config.getRedFlexCentis()) + " "
+                + LightConfig.formatCentis(config.getRedTimeOnCentis()) + " "
+                + LightConfig.formatCentis(config.getRedTimeOffCentis()) + " "
+                + LightConfig.formatCentis(config.getRedSlowOnCentis()) + " "
+                + LightConfig.formatCentis(config.getRedSlowOffCentis());
+        context.getSource().sendFeedback(() -> Text.literal(value), false);
+        return 1;
+    }
+
+    /** {@code /hlight flex}：回「开关 数值」（如 {@code 1 4.00}）。 */
+    private static int queryRedFlex(CommandContext<ServerCommandSource> context) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        String value = (config.isRedFlexOn() ? "1 " : "0 ")
+                + LightConfig.formatCentis(config.getRedFlexCentis());
+        context.getSource().sendFeedback(() -> Text.literal(value), false);
+        return 1;
+    }
+
+    /** {@code /hlight time} / {@code /hlight slow}：回「on值 off值」（如 {@code 2.00 2.00}）。 */
+    private static int queryPair(CommandContext<ServerCommandSource> context,
+                                 ToIntFunction<LightConfig> onGetter, ToIntFunction<LightConfig> offGetter) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        String value = LightConfig.formatCentis(onGetter.applyAsInt(config)) + " "
+                + LightConfig.formatCentis(offGetter.applyAsInt(config));
+        context.getSource().sendFeedback(() -> Text.literal(value), false);
+        return 1;
+    }
+
+    /** {@code /flex}：回「开关 间隔 熄灭比例 偏差 递增」（比例 -1 = 未设）。 */
+    private static int queryFlexAll(CommandContext<ServerCommandSource> context) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        String value = (config.isYellowFlexOn() ? "1 " : "0 ")
+                + LightConfig.formatCentis(config.getYellowFlexTimeCentis()) + " "
+                + config.getYellowFlexPercent() + " "
+                + LightConfig.formatCentis(config.getYellowFlexJitterCentis()) + " "
+                + LightConfig.formatCentis(config.getYellowFlexGrowCentis());
+        context.getSource().sendFeedback(() -> Text.literal(value), false);
+        return 1;
+    }
+
+    /** {@code /flex flex}：回偏差值。 */
+    private static int queryFlexJitter(CommandContext<ServerCommandSource> context) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        String value = LightConfig.formatCentis(config.getYellowFlexJitterCentis());
+        context.getSource().sendFeedback(() -> Text.literal(value), false);
+        return 1;
+    }
+
+    /** {@code /flex grow}：回递增值。 */
+    private static int queryFlexGrow(CommandContext<ServerCommandSource> context) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        String value = LightConfig.formatCentis(config.getYellowFlexGrowCentis());
+        context.getSource().sendFeedback(() -> Text.literal(value), false);
+        return 1;
+    }
+
+    // ---------------------------------------------------------------- 写入
+
+    /**
+     * 写完之后统一走这里：<b>立刻</b>把全场已加载的灯光方块按新设置刷新一遍，再回「指令执行成功」。
+     *
+     * <p>有了这一步，{@code /light -f off} 是**当场**全部熄灭（不等黄灯那 5 tick 节流，
+     * 也能灭掉超出模拟距离、根本不会 tick 的方块）—— 对应「无论什么情况，立即熄灭」。
+     * 指令是低频操作，扫一遍全场可忽略。
+     */
+    private static int ok(CommandContext<ServerCommandSource> context) {
+        LightIndex.refreshAll(context.getSource().getServer());
+        context.getSource().sendFeedback(() -> FEEDBACK_OK, false);
+        return 1;
+    }
+
+    /** 应用一个写开关的动作，回「指令执行成功」。 */
+    private static int applyBoolean(CommandContext<ServerCommandSource> context, Consumer<LightConfig> setter) {
+        setter.accept(LightConfig.get(context.getSource().getWorld()));
+        return ok(context);
+    }
+
+    /** {@code /flex on|off}（不带 time）：只切开关。 */
+    private static int setFlexSwitch(CommandContext<ServerCommandSource> context, boolean enable) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        config.setYellowFlexOn(enable);
+        return ok(context);
+    }
+
+    /** {@code /flex on|off time Y [percent X]}：写入间隔（可选比例）并切开关。先全部校验再落盘。 */
+    private static int applyFlex(CommandContext<ServerCommandSource> context, boolean enable,
+                                 String rawTime, String rawPercent) {
+        Integer timeCentis = parseCentis(rawTime,
+                LightConfig.MIN_YELLOW_FLEX_TIME_CENTIS, LightConfig.MAX_RED_CENTIS);
+        Integer percent = null;
+        if (rawPercent != null) {
+            percent = parseInRange(rawPercent, LightConfig.YELLOW_FLEX_PERCENT_UNSET, 100);
+        }
+        if (timeCentis == null || (rawPercent != null && percent == null)) {
+            context.getSource().sendError(FEEDBACK_FAIL);
+            return 0;
+        }
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        config.setYellowFlexTimeCentis(timeCentis);
+        if (percent != null) {
+            config.setYellowFlexPercent(percent);
+        }
+        config.setYellowFlexOn(enable);
+        return ok(context);
+    }
+
+    /** {@code /flex flex X}：写入偏差（0~600 秒）。 */
+    private static int setFlexJitter(CommandContext<ServerCommandSource> context, String rawValue) {
+        Integer centis = parseCentis(rawValue,
+                LightConfig.MIN_YELLOW_FLEX_JITTER_CENTIS, LightConfig.MAX_RED_CENTIS);
+        if (centis == null) {
+            context.getSource().sendError(FEEDBACK_FAIL);
+            return 0;
+        }
+        LightConfig.get(context.getSource().getWorld()).setYellowFlexJitterCentis(centis);
+        return ok(context);
+    }
+
+    /** {@code /flex grow X}：写入递增（-600 ~ +600 秒）。 */
+    private static int setFlexGrow(CommandContext<ServerCommandSource> context, String rawValue) {
+        Integer centis = parseCentis(rawValue,
+                LightConfig.MIN_YELLOW_FLEX_GROW_CENTIS, LightConfig.MAX_RED_CENTIS);
+        if (centis == null) {
+            context.getSource().sendError(FEEDBACK_FAIL);
+            return 0;
+        }
+        LightConfig.get(context.getSource().getWorld()).setYellowFlexGrowCentis(centis);
+        return ok(context);
+    }
+
+    /**
+     * {@code /hlight flex on|off [X]} 的实际处理。
+     *
+     * @param rawValue 需要一并写入的「错开时长」；为 null 表示不改（沿用已存的）
+     * @param on       这次要开还是关
+     */
+    private static int setRedFlex(CommandContext<ServerCommandSource> context, String rawValue, boolean on) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        if (rawValue != null) {
+            Integer centis = parseCentis(rawValue,
+                    LightConfig.MIN_RED_FLEX_CENTIS, LightConfig.MAX_RED_CENTIS);
+            if (centis == null) {
+                context.getSource().sendError(FEEDBACK_FAIL);
+                return 0;
+            }
+            config.setRedFlexCentis(centis);
+        }
+        config.setRedFlexOn(on);
+        return ok(context);
+    }
+
+    // ---------------------------------------------------------------- 指令叶子构造
+
+    /**
+     * 注册一条「{@code X}」形式的整数子指令（挂在 /light 下），支持查询与写入。
+     */
+    private static LiteralArgumentBuilder<ServerCommandSource> intLeaf(
+            String name, int min, int max,
+            ToIntFunction<LightConfig> getter, BiConsumer<LightConfig, Integer> setter) {
+        return CommandManager.literal(name)
+                // 不带参数 = 查询（按规矩只回数值）
+                .executes(context -> {
+                    int current = getter.applyAsInt(LightConfig.get(context.getSource().getWorld()));
+                    context.getSource().sendFeedback(() -> Text.literal(Integer.toString(current)), false);
+                    return 1;
+                })
+                .then(CommandManager.argument("value", StringArgumentType.word())
+                        .executes(context -> {
+                            Integer value = parseInRange(StringArgumentType.getString(context, "value"), min, max);
+                            if (value == null) {
+                                context.getSource().sendError(FEEDBACK_FAIL);
+                                return 0;
+                            }
+                            setter.accept(LightConfig.get(context.getSource().getWorld()), value);
+                            return ok(context);
+                        }));
+    }
+
+    /**
+     * 注册一条「{@code X}」形式的**小数秒**子指令（挂在 /hlight 下），支持查询与写入。
+     * 内部按「百分之一秒」存整数，所以 2 位小数精确无损。
+     */
+    private static LiteralArgumentBuilder<ServerCommandSource> centisLeaf(
+            String name, int minCentis, int maxCentis,
+            ToIntFunction<LightConfig> getter, ObjIntConsumer<LightConfig> setter) {
+        return CommandManager.literal(name)
+                .executes(context -> {
+                    int centis = getter.applyAsInt(LightConfig.get(context.getSource().getWorld()));
+                    context.getSource().sendFeedback(() -> Text.literal(LightConfig.formatCentis(centis)), false);
+                    return 1;
+                })
+                .then(CommandManager.argument("value", StringArgumentType.word())
+                        .executes(context -> {
+                            Integer centis = parseCentis(StringArgumentType.getString(context, "value"),
+                                    minCentis, maxCentis);
+                            if (centis == null) {
+                                context.getSource().sendError(FEEDBACK_FAIL);
+                                return 0;
+                            }
+                            setter.accept(LightConfig.get(context.getSource().getWorld()), centis);
+                            return ok(context);
+                        }));
+    }
+
+    // ---------------------------------------------------------------- 解析工具
+
+    /** 解析出 [min, max] 内的整数，非法一律返回 null。 */
+    private static Integer parseInRange(String raw, int min, int max) {
+        try {
+            int value = Integer.parseInt(raw);
+            return value >= min && value <= max ? value : null;
+        } catch (NumberFormatException notANumber) {
+            return null;
+        }
+    }
+
+    /**
+     * 解析「秒」并换算成百分之一秒的整数（所有小数指令共用）。
+     *
+     * <p>用 {@link BigDecimal} 而不是 {@code Double.parseDouble}：这样 {@code "0.30"} 精确等于 30，
+     * 不会有二进制浮点误差；超过 2 位小数的输入（如 {@code "1.234"}）按四舍五入取到 2 位。
+     * 非数字、超出 [min, max] 一律返回 null（由调用方统一回「指令执行失败」）。
+     */
+    private static Integer parseCentis(String raw, int minCentis, int maxCentis) {
+        try {
+            int centis = new BigDecimal(raw)
+                    .movePointRight(2)                       // 秒 -> 百分之一秒
+                    .setScale(0, RoundingMode.HALF_UP)       // 取整到 0.01 秒
+                    .intValueExact();
+            return centis >= minCentis && centis <= maxCentis ? centis : null;
+        } catch (ArithmeticException | NumberFormatException notAValidNumber) {
+            return null;
+        }
+    }
+}

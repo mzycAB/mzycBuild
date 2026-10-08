@@ -1,0 +1,40 @@
+# ===== Gradle =====
+# 注意：必须用 / 开头的锚定写法！
+# 本项目的 Java 包名就叫 com.mzyc.build，若写成 build/ 会把
+# src/main/java/com/mzyc/build/ 下的所有 .java 一起忽略掉。
+/.gradle/
+/build/
+/out/
+
+# ===== Fabric Loom / 运行目录 =====
+/run/
+/remappedSrc/
+/.loom/
+/.fabric/
+
+# ===== IDE =====
+/.idea/
+/.vscode/
+/.settings/
+/.classpath
+/.project
+/.bin/
+/*.iml
+/*.ipr
+/*.iws
+/*.launch
+
+# ===== Java =====
+*.class
+
+# ===== 日志 / 临时文件 =====
+/logs/
+*.log
+*.tmp
+*.bak
+*~
+
+# ===== 操作系统 =====
+desktop.ini
+Thumbs.db
+.DS_Store

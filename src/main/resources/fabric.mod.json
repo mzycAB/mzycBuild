@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "mzycbuild",
+  "version": "${version}",
+  "name": "mzycBuild",
+  "description": "建筑辅助：只对持有者可见的「整方块彩色线框」灯光方块，均可穿过、占位不可替换。黄色灯光方块入夜每块独立掷骰，掷中后再随机延迟点亮，天亮自动熄灭；可开启夜间随机重分配：给 percent X 则每轮在还亮着的灯里只熄灭不亮灯（剩得不够一盏时全灭），不给则每轮有熄灭有点亮。红色灯光方块入夜固定闪烁，亮起 / 熄灭时间与两端渐变时间都可调，默认全世界同步，可用错开让每块各闪各的。总开关（改完立即全场生效）：/light on|off 黄灯、/light h on|off 红灯、/light -f on|off 全灭（无论什么情况，黄红当场全部熄灭）。其它指令：/light percent X 点亮比例（%）、/light light X 灯光亮度（0~15，同原版光源方块）、/light delay Y 延迟上限（秒）、/hlight time on|off X 红灯亮起/熄灭时间（秒，2 位小数）、/hlight slow on|off X 红灯灭→亮 / 亮→灭渐变时间（秒，2 位小数）、/hlight flex on|off [X] 红灯错开 + 随机错开时长（秒，2 位小数）、/flex on time Y [percent X] 黄灯重分配间隔（秒）与每轮熄灭比例（%）、/flex off 关闭重分配、/flex flex X 每块偏差（秒）、/flex grow X 每轮间隔递增/递减（秒，可负）；首次装模组默认 30% / 12 / 60 秒 / 亮 2.00 灭 2.00 秒 / 渐变各 0.10 秒 / 错开关 4.00 秒 / 重分配关，随存档保存。原版光照是白光；彩色光照（如红灯投红光）由光影包的彩色光效决定。",
+  "authors": [
+    "mzyc"
+  ],
+  "license": "MIT",
+  "icon": "assets/mzycbuild/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.mzyc.build.MzycBuild"
+    ],
+    "client": [
+      "com.mzyc.build.client.MzycBuildClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.15.1",
+    "fabric-api": "*",
+    "minecraft": "~1.20.4",
+    "java": ">=17"
+  }
+}
