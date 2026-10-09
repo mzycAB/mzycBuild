@@ -25,7 +25,10 @@ import java.util.function.ToIntFunction;
  * <ul>
  *   <li>{@code /light percent X} —— 夜晚点亮比例（%，0~100，默认 20）</li>
  *   <li>{@code /light light X} —— 灯光亮度（0~15，和原版光源方块同一套语义，默认 12）</li>
- *   <li>{@code /light delay Y} —— 点亮延迟上限（秒，0~600，默认 60；实际延迟在 0~Y 秒之间随机）</li>
+ *   <li>{@code /light nightdelay Y} —— <b>天黑</b>随机点亮秒数（0~600，默认 60；实际延迟在 0~Y 秒之间随机）。
+ *       {@code /light delay Y} 是它的旧名，仍然可用（同一个字段）</li>
+ *   <li>{@code /light daydelay Y} —— <b>天亮</b>随机熄灭秒数（0~600，默认 60）：
+ *       天亮那一刻还亮着的灯，各自在 0~Y 秒内随机熄灭完，Y 秒内全黑（不再是天一亮就一起灭）</li>
  *   <li>{@code /light on|off} —— 黄灯总开关（默认开）</li>
  *   <li>{@code /light h on|off} —— 红灯总开关（默认开）</li>
  *   <li>{@code /light -f on|off} / {@code /light all on|off} / {@code /lightall on|off} /
@@ -66,7 +69,7 @@ import java.util.function.ToIntFunction;
  *
  * <p>不带参数的写法都是**查询**，只回当前数值：
  * <ul>
- *   <li>{@code /light} → {@code 比例 亮度 延迟 黄开关 红开关 全灭}（如 {@code 20 12 60 1 1 0}）</li>
+ *   <li>{@code /light} → {@code 比例 亮度 天黑秒数 天亮秒数 黄开关 红开关 全灭}（如 {@code 20 12 60 60 1 1 0}）</li>
  *   <li>{@code /light h}/{@code /light -f} → 开关值 {@code 1}/{@code 0}</li>
  *   <li>{@code /lightall} / {@code /alllight} → 全灭开关值 {@code 1}/{@code 0}；{@code /flexable} → 乱闪开关值 {@code 1}/{@code 0}</li>
  *   <li>{@code /hlight} → 六个数（开关 错开值 亮起值 熄灭值 渐变亮值 渐变灭值）；
@@ -139,13 +142,19 @@ public final class LightCommand {
                         .then(CommandManager.literal("default")
                                 .executes(LightCommand::resetDefaults)))
 
-                // 整数参数：percent | light | delay
+                // 整数参数：percent | light | nightdelay | daydelay
                 .then(intLeaf("percent", LightConfig.MIN_PERCENT, LightConfig.MAX_PERCENT,
                         LightConfig::getPercent, LightConfig::setPercent))
                 .then(intLeaf("light", LightConfig.MIN_LIGHT_LEVEL, LightConfig.MAX_LIGHT_LEVEL,
                         LightConfig::getLightLevel, LightConfig::setLightLevel))
+                // 天黑随机点亮秒数：新名字 nightdelay；旧名字 delay 仍然认（同一个字段，防旧笔记/旧习惯失效）
+                .then(intLeaf("nightdelay", LightConfig.MIN_DELAY_SECONDS, LightConfig.MAX_DELAY_SECONDS,
+                        LightConfig::getDelaySeconds, LightConfig::setDelaySeconds))
                 .then(intLeaf("delay", LightConfig.MIN_DELAY_SECONDS, LightConfig.MAX_DELAY_SECONDS,
-                        LightConfig::getDelaySeconds, LightConfig::setDelaySeconds));
+                        LightConfig::getDelaySeconds, LightConfig::setDelaySeconds))
+                // 天亮随机熄灭秒数
+                .then(intLeaf("daydelay", LightConfig.MIN_DELAY_SECONDS, LightConfig.MAX_DELAY_SECONDS,
+                        LightConfig::getDayDelaySeconds, LightConfig::setDayDelaySeconds));
     }
 
     // ---------------------------------------------------------------- /hlight
@@ -304,10 +313,11 @@ public final class LightCommand {
 
     // ---------------------------------------------------------------- 查询
 
-    /** {@code /light}：回全部数值（比例 亮度 延迟 黄开关 红开关 全灭）。 */
+    /** {@code /light}：回全部数值（比例 亮度 天黑秒数 天亮秒数 黄开关 红开关 全灭）。 */
     private static int queryLightAll(CommandContext<ServerCommandSource> context) {
         LightConfig config = LightConfig.get(context.getSource().getWorld());
         String value = config.getPercent() + " " + config.getLightLevel() + " " + config.getDelaySeconds()
+                + " " + config.getDayDelaySeconds()
                 + " " + (config.isYellowOn() ? "1" : "0")
                 + " " + (config.isRedOn() ? "1" : "0")
                 + " " + (config.isForceOff() ? "1" : "0");

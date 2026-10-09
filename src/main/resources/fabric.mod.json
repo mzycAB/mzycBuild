@@ -3,7 +3,7 @@
   "id": "mzycbuild",
   "version": "${version}",
   "name": "mzycBuild",
-  "description": "建筑辅助：只对持有者可见的「整方块彩色线框」灯光方块，均可穿过、占位不可替换。黄色灯光方块入夜每块独立掷骰，掷中后再随机延迟点亮（比例 /light percent X、亮度 /light light X、延迟上限 /light delay Y）；出厂默认开着重分配：/flex off time 60 percent 10 = 每 60 秒熄灭 10% 还亮着的灯（越点越少、最终全灭），/flex on time Y 则每轮按比例重新分配（有灭也有亮），/flex all off 彻底关闭重分配。红色灯光方块入夜固定闪烁，亮起/熄灭时间与两端渐变可调，并可按坐标错开各闪各的。总开关（改完立即全场生效）：/light on|off 黄灯、/light h on|off 红灯、/light -f on|off（= /light all、/lightall、/alllight）全灭（无论什么情况，黄红当场全部熄灭，只认 on 恢复）。/flexable on|off 让黄灯在夜里脱离一切设定纯随机乱闪。/light define default 一键把所有设置还原为出厂默认。首次给存档装上模组即是这套默认：20% / 12 / 60 秒 / 红灯亮 2.00 灭 2.00 秒 / 渐变各 0.50 秒 / 错开 1.00 秒且开 / 黄灯熄灭模式 60 秒 10%。全部设置随存档保存（存档文件夹内部的 data/mzycbuild_light.dat，服务端数据，与客户端无关）。原版光照是白光；彩色光照（如红灯投红光）由光影包的彩色光效决定。",
+  "description": "建筑辅助：只对持有者可见的「整方块彩色线框」灯光方块，均可穿过、占位不可替换。黄色灯光方块入夜每块独立掷骰，掷中后再随机延迟点亮（比例 /light percent X、亮度 /light light X、天黑随机点亮秒数 /light nightdelay Y，旧名 /light delay）；天亮也不是一起灭：天亮那一刻还亮着的灯各自在 0~天亮的随机熄灭秒数（/light daydelay Y，默认 60 秒）内陆续熄完。出厂默认开着重分配：/flex off time 60 percent 10 = 每 60 秒熄灭 10% 还亮着的灯（越点越少、最终全灭），/flex on time Y 则每轮按比例重新分配（有灭也有亮），/flex all off 彻底关闭重分配。红色灯光方块入夜固定闪烁，亮起/熄灭时间与两端渐变可调，并可按坐标错开各闪各的。总开关（改完立即全场生效）：/light on|off 黄灯、/light h on|off 红灯、/light -f on|off（= /light all、/lightall、/alllight）全灭（无论什么情况，黄红当场全部熄灭，只认 on 恢复）。/flexable on|off 让黄灯在夜里脱离一切设定纯随机乱闪。/light define default 一键把所有设置还原为出厂默认。首次给存档装上模组即是这套默认：20% / 12 / 天黑 60 秒 / 天亮 60 秒 / 红灯亮 2.00 灭 2.00 秒 / 渐变各 0.50 秒 / 错开 1.00 秒且开 / 黄灯熄灭模式 60 秒 10%。/mb help（也认 /MB help）打开设置界面：上面这些指令全做成了分级菜单里的按钮和输入框，点按钮不会往聊天框刷回执，退出界面才汇总一条 UI执行成功/失败。全部设置随存档保存（存档文件夹内部的 data/mzycbuild_light.dat，服务端数据，与客户端无关）。原版光照是白光；彩色光照（如红灯投红光）由光影包的彩色光效决定。",
   "authors": [
     "mzyc"
   ],

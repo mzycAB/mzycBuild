@@ -13,9 +13,14 @@ import net.minecraft.world.PersistentState;
  *
  * <p><b>黄 / 通用（/light …）</b>
  * <ul>
- *   <li>{@code /light percent X} —— 夜晚点亮比例（%，默认 30）</li>
+ *   <li>{@code /light percent X} —— 夜晚点亮比例（%，默认 20）</li>
  *   <li>{@code /light light X} —— 灯光亮度（0~15，和原版光源方块同一套语义，默认 12）</li>
- *   <li>{@code /light delay Y} —— 点亮延迟上限（秒，实际延迟在 0~Y 秒之间随机，默认 60）</li>
+ *   <li>{@code /light nightdelay Y} —— <b>天黑</b>随机点亮秒数（0~600，默认 60）：
+ *       实际延迟在 0~Y 秒之间按坐标确定性随机，所以不是天一抹黑全场同性一起亮。
+ *       旧的 {@code /light delay Y} 仍可用（同一个字段的别名）。</li>
+ *   <li>{@code /light daydelay Y} —— <b>天亮</b>随机熄灭秒数（0~600，默认 60）：
+ *       天亮那一刻还亮着的灯，各自在 0~Y 秒内按坐标确定性随机熄灭，Y 秒内全部熄完
+ *       （不再是天一亮就「啪」地一起灭）。{@code 0} = 天一亮立刻全灭。</li>
  * </ul>
  *
  * <p><b>红灯（/hlight …）</b> —— 全部支持 2 位小数，内部按「百分之一秒」存整数
@@ -42,7 +47,8 @@ import net.minecraft.world.PersistentState;
  * </ul>
  *
  * <p>出厂默认（= {@code /light define default} 写进去的那一套 = 第一次给存档装上模组时的默认）：
- * 比例 20%、亮度 12、延迟 60 秒；红灯亮 2.00 / 灭 2.00 秒、两端渐变各 0.50 秒、错开上限 1.00 秒且<b>开</b>；
+ * 比例 20%、亮度 12、天黑随机点亮 60 秒（{@code nightdelay}）、天亮随机熄灭 60 秒（{@code daydelay}）；
+ * 红灯亮 2.00 / 灭 2.00 秒、两端渐变各 0.50 秒、错开上限 1.00 秒且<b>开</b>；
  * 黄灯重分配<b>开</b>且是<b>熄灭模式</b>（间隔 60.00 秒、熄灭比例 10、偏差 2.00 秒、递增 0）——
  * 也就是夜里灯亮起来之后，每 60 秒自动灭掉 10% 还亮着的；{@code flexable} 关。
  *
@@ -74,8 +80,16 @@ public class LightConfig extends PersistentState {
     public static final int DEFAULT_PERCENT = 20;
     /** 第一次加入模组时的灯光亮度。 */
     public static final int DEFAULT_LIGHT_LEVEL = 12;
-    /** 第一次加入模组时的点亮延迟上限（秒）。 */
+    /** 第一次加入模组时的<b>天黑</b>随机点亮延迟上限（秒）。 */
     public static final int DEFAULT_DELAY_SECONDS = 60;
+
+    /**
+     * 第一次加入模组时的<b>天亮</b>随机熄灭时长上限（秒）。
+     *
+     * <p>天亮那一刻还亮着的灯，各自在 {@code [0, 这个值]} 秒内随机熄灭完；
+     * 所以天亮后最多等这么久就全黑，且中间是「陆陆续续灭」，不是一起灭。
+     */
+    public static final int DEFAULT_DAY_DELAY_SECONDS = 60;
 
     public static final int MIN_PERCENT = 0;
     public static final int MAX_PERCENT = 100;
@@ -84,7 +98,11 @@ public class LightConfig extends PersistentState {
     public static final int MIN_LIGHT_LEVEL = 0;
     public static final int MAX_LIGHT_LEVEL = 15;
 
-    /** 上限放到 600 秒；夜晚本身只有 500 秒，超过 500 的延迟等于「那晚不亮」。 */
+    /**
+     * 两个随机时长（{@code /light nightdelay} 与 {@code /light daydelay}）共用的上下限。
+     *
+     * <p>上限放到 600 秒；夜晚本身只有 500 秒，超过 500 的延迟等于「那晚不亮」。
+     */
     public static final int MIN_DELAY_SECONDS = 0;
     public static final int MAX_DELAY_SECONDS = 600;
 
@@ -207,6 +225,7 @@ public class LightConfig extends PersistentState {
     private static final String KEY_PERCENT = "litPercent";
     private static final String KEY_LIGHT_LEVEL = "lightLevel";
     private static final String KEY_DELAY_SECONDS = "delaySeconds";
+    private static final String KEY_DAY_DELAY_SECONDS = "dayDelaySeconds";
     private static final String KEY_RED_TIME_ON_CENTIS = "redTimeOnCentis";
     private static final String KEY_RED_TIME_OFF_CENTIS = "redTimeOffCentis";
     private static final String KEY_RED_SLOW_ON_CENTIS = "redSlowOnCentis";
@@ -238,6 +257,7 @@ public class LightConfig extends PersistentState {
     private int percent = DEFAULT_PERCENT;
     private int lightLevel = DEFAULT_LIGHT_LEVEL;
     private int delaySeconds = DEFAULT_DELAY_SECONDS;
+    private int dayDelaySeconds = DEFAULT_DAY_DELAY_SECONDS;
     private int redTimeOnCentis = DEFAULT_RED_TIME_ON_CENTIS;
     private int redTimeOffCentis = DEFAULT_RED_TIME_OFF_CENTIS;
     private int redSlowOnCentis = DEFAULT_RED_SLOW_ON_CENTIS;
@@ -266,8 +286,14 @@ public class LightConfig extends PersistentState {
         return lightLevel;
     }
 
+    /** 天黑随机点亮延迟上限（秒）；对应 {@code /light nightdelay Y}（旧名 {@code /light delay}）。 */
     public int getDelaySeconds() {
         return delaySeconds;
+    }
+
+    /** 天亮随机熄灭时长上限（秒）；对应 {@code /light daydelay Y}。 */
+    public int getDayDelaySeconds() {
+        return dayDelaySeconds;
     }
 
     public int getRedTimeOnCentis() {
@@ -402,9 +428,14 @@ public class LightConfig extends PersistentState {
         lightLevel = setClamped(lightLevel, value, MIN_LIGHT_LEVEL, MAX_LIGHT_LEVEL);
     }
 
-    /** 写入并夹到 0~600。 */
+    /** 写入并夹到 0~600（{@code /light nightdelay}）。 */
     public void setDelaySeconds(int value) {
         delaySeconds = setClamped(delaySeconds, value, MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+    }
+
+    /** 写入并夹到 0~600（{@code /light daydelay}）。 */
+    public void setDayDelaySeconds(int value) {
+        dayDelaySeconds = setClamped(dayDelaySeconds, value, MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
     }
 
     /** 写入并夹到 0.00~600.00 秒（以百分之一秒为单位）。 */
@@ -496,7 +527,8 @@ public class LightConfig extends PersistentState {
      * 把设置一次性还原成出厂默认值 —— 对应 {@code /light define default}。
      *
      * <p>这份默认值就是指令清单本身：
-     * {@code light light 12} / {@code light delay 60} / {@code light percent 20}
+     * {@code light light 12} / {@code light nightdelay 60} / {@code light daydelay 60}
+     * / {@code light percent 20}
      * / {@code hlight slow on 0.5} / {@code hlight time on 2} / {@code hlight flex on 1}
      * / {@code flex flex 2} / {@code flex off time 60 percent 10} / {@code flex grow off}
      * （{@code /flex off} = 熄灭模式<b>生效</b> ⇒ 夜里灯会每 60 秒灭掉 10% 还亮着的），
@@ -511,6 +543,7 @@ public class LightConfig extends PersistentState {
         percent = DEFAULT_PERCENT;
         lightLevel = DEFAULT_LIGHT_LEVEL;
         delaySeconds = DEFAULT_DELAY_SECONDS;
+        dayDelaySeconds = DEFAULT_DAY_DELAY_SECONDS;
         redTimeOnCentis = DEFAULT_RED_TIME_ON_CENTIS;
         redTimeOffCentis = DEFAULT_RED_TIME_OFF_CENTIS;
         redSlowOnCentis = DEFAULT_RED_SLOW_ON_CENTIS;
@@ -552,6 +585,7 @@ public class LightConfig extends PersistentState {
         nbt.putInt(KEY_PERCENT, percent);
         nbt.putInt(KEY_LIGHT_LEVEL, lightLevel);
         nbt.putInt(KEY_DELAY_SECONDS, delaySeconds);
+        nbt.putInt(KEY_DAY_DELAY_SECONDS, dayDelaySeconds);
         nbt.putInt(KEY_RED_TIME_ON_CENTIS, redTimeOnCentis);
         nbt.putInt(KEY_RED_TIME_OFF_CENTIS, redTimeOffCentis);
         nbt.putInt(KEY_RED_SLOW_ON_CENTIS, redSlowOnCentis);
@@ -581,6 +615,11 @@ public class LightConfig extends PersistentState {
         }
         if (nbt.contains(KEY_DELAY_SECONDS)) {
             config.delaySeconds = MathHelper.clamp(nbt.getInt(KEY_DELAY_SECONDS), MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
+        }
+        // 老存档没有这个 key ⇒ 落到默认 60（和「第一次加入模组」完全一致，不必额外迁移）
+        if (nbt.contains(KEY_DAY_DELAY_SECONDS)) {
+            config.dayDelaySeconds = MathHelper.clamp(nbt.getInt(KEY_DAY_DELAY_SECONDS),
+                    MIN_DELAY_SECONDS, MAX_DELAY_SECONDS);
         }
 
         // ---- 红灯新字段（缺哪个补哪个的默认值）

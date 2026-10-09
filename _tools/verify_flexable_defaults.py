@@ -4,8 +4,9 @@
   1. 新指令 /lightall on|off —— 「强制不发光」总闸，写的是和 /light -f、/light all
      同一份 forceOff 状态；关掉后黄/红一律不发光，无视一切设置，直到重新打开。
   2. 新指令 /light define default —— 把全部设置还原成出厂默认：
-     light light 12 / light delay 60 / light percent 30 / hlight slow on 0.5 /
-     hlight time on 2 / hlight flex on 1 / flex flex 2 / flex off time 60 percent 10 /
+     light light 12 / light nightdelay 60（旧名 light delay）/ light daydelay 60 /
+     light percent 20 / hlight slow on 0.5 / hlight time on 2 / hlight flex on 1 /
+     flex flex 2 / flex off time 60 percent 10 /
      flex grow off（外加黄/红分组开关恢复为开、乱闪恢复为关；刻意不动 forceOff）。
   3. 新指令 /flexable on|off —— 开启后天黑黄灯脱离一切设定、按坐标散列出的随机节奏乱闪。
   4. 新指令 /flex all on|off —— flex 功能的总开关显式写法（/flex all off = 彻底关闭 flex 功能），
@@ -97,12 +98,13 @@ def main():
     command_text = open(COMMAND_JAVA, encoding="utf-8").read()
 
     print("== A. 出厂默认常量 vs 需求清单（light define default）==")
-    # 需求：light light=12 / light delay=60 / light percent=30 /
+    # 需求：light light=12 / light nightdelay=60 / light daydelay=60 / light percent=20 /
     #       hlight slow on 0.5 / hlight time on 2 / hlight flex on 1 /
     #       flex flex 2 / flex off time 60 percent 10 / flex grow off
     expected = {
         "DEFAULT_LIGHT_LEVEL":              12,      # light light 12
-        "DEFAULT_DELAY_SECONDS":            60,      # light delay 60
+        "DEFAULT_DELAY_SECONDS":            60,      # light nightdelay 60（旧名 light delay）
+        "DEFAULT_DAY_DELAY_SECONDS":        60,      # light daydelay 60（天亮随机熄灭）
         "DEFAULT_PERCENT":                  20,      # light percent 20（2026-10-09 由 30 改成 20）
         "DEFAULT_RED_TIME_ON_CENTIS":       200,     # hlight time on 2（= 2.00s）
         "DEFAULT_RED_TIME_OFF_CENTIS":      200,     # 熄灭时间 2s
@@ -133,8 +135,8 @@ def main():
     ok &= not touches_force_off
     # 反向确认：确实有别的赋值，别是个空方法
     assigned = len(re.findall(r"^[ \t]*\w+[ \t]*=", body, re.M))
-    print(f"  resetToDefaults() 里共有 {assigned} 处赋值（应 = 18，覆盖除 forceOff 外的全部设置）")
-    ok &= assigned == 18
+    print(f"  resetToDefaults() 里共有 {assigned} 处赋值（应 = 19，覆盖除 forceOff 外的全部设置）")
+    ok &= assigned == 19
 
     print("\n== C. 指令注册到位 ==")
     for literal, note in (('"flexable"', "/flexable [on|off]"),

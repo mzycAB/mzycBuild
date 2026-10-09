@@ -16,8 +16,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 灯光方块的方块实体：负责「入夜掷骰 → 随机延迟后亮起 → 天亮熄灭」，
+ * 灯光方块的方块实体：负责「入夜掷骰 → 随机延迟后亮起 → 天亮随机熄灭」，
  * 以及黄灯专属的「夜间随机重分配」（{@code /flex …}）。
+ *
+ * <h2>天亮也是随机的（{@code /light daydelay Y}）</h2>
+ * 修掉的老毛病：以前判定极其干脆 —— {@code timeOfDay} 一越过 23000，全场灯<b>同一瞬间一起灭</b>。
+ * 现在是：观察到天亮的那一刻，先把「此刻还亮着的灯」记下来（{@code dayFadeLit}），
+ * 然后每块按坐标 + 本晚编号散列出一个 0~{@code Y} 秒的固定等待（{@link #dayOffTicks}），
+ * 谁先到点谁先灭 —— 于是天亮后是「陆陆续续熄灯」，<b>Y 秒内全部熄完</b>。
+ * {@code /light daydelay 0} 就退回「天一亮立刻全灭」的老行为。
+ * 等待值也是确定性的（同坐标同一晚恒定），存档重启、区块卸载重载都不会换一套灭法。
  *
  * <h2>⚠️ 两个时间源必须分清（这是之前「黄灯红灯都不亮」的根因）</h2>
  * MC 的 {@code World} 有两个时钟，{@code doDaylightCycle=false} 时只有一个还在走
@@ -78,8 +86,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * <b>开关是「立即」生效的</b>：指令写完会当场把全场已加载的方块刷新一遍（见 {@code LightIndex}），
  * 既不等黄灯那 5 tick 节流，也能灭掉超出模拟距离、根本不会 tick 的边界区块方块。
  *
- * <p>比例 / 亮度 / 延迟上限都由 {@link LightConfig} 提供（默认 30% / 12 / 60 秒，
- * 对应 {@code /light percent X}、{@code /light light X}、{@code /light delay Y}）。
+ * <p>比例 / 亮度 / 两个随机时长都由 {@link LightConfig} 提供（默认 20% / 12 / 天黑 60 秒 / 天亮 60 秒，
+ * 对应 {@code /light percent X}、{@code /light light X}、{@code /light nightdelay Y}、{@code /light daydelay Y}）。
  *
  * <p><b>诊断日志</b>：带 {@code [mzycBuild/诊断]} 的几行只写日志文件、不碰任何 UI 文字。
  */
@@ -108,6 +116,8 @@ public class LightBlockEntity extends BlockEntity {
     private static final long EXTINGUISH_SALT = 0x455854494E475348L;
     /** 纯随机乱闪（{@code /flexable on}）散列用的盐（"FLEXABLE" 的 ASCII）。 */
     private static final long FLEXABLE_SALT = 0x464C455841424C45L;
+    /** 「天亮后第几秒熄灭」散列用的盐（"DAY_DLAY" 的 ASCII），和天黑那个盐分开 ⇒ 两个随机互不相关。 */
+    private static final long DAY_DELAY_SALT = 0x4441595F444C4159L;
 
     /** 乱闪时每块方块的「亮」持续时间范围（tick）：4~24 tick（0.20~1.20 秒）。 */
     private static final long FLEXABLE_MIN_LIT_TICKS = 4L;
@@ -134,6 +144,26 @@ public class LightBlockEntity extends BlockEntity {
      * 锁存后整夜目标固定，彻底消除。
      */
     private long nightDelayTicks;
+
+    // ---------------- 天亮随机熄灭（{@code /light daydelay Y}）的状态（存进 NBT） ----------------
+
+    /**
+     * 是否已经锁存了「天亮了」这件事。
+     *
+     * <p>和 {@code nightLatched} 一样是**本地观察**出来的：方块实体从「是夜晚」变到「不是夜晚」
+     * 的那一刻，就是这一次天亮，把它锁存下来（{@code dayStartedAt}），
+     * 之后每块各自在 0~{@code /light daydelay} 秒内随机熄灭。
+     */
+    private boolean dayLatched;
+    /** 观察到天亮的那一刻，用 gameTime 记（不受 doDaylightCycle 影响，永远在走）。 */
+    private long dayStartedAt;
+    /**
+     * 天亮那一瞬间这块亮不亮。
+     *
+     * <p>只有亮着的灯才需要「天亮后随机熄灭」：不亮的灯天亮前后都不亮，掺进去只会让它
+     * 在熄灭窗口里诡异地闪一下。这个值在天亮那一刻算一次就锁存住，整段窗口内不变。
+     */
+    private boolean dayFadeLit;
 
     /** 上一次 {@link #evaluate} 算出的轮次，只给诊断日志用。 */
     private int lastFlexRound;
@@ -173,14 +203,19 @@ public class LightBlockEntity extends BlockEntity {
         long timeOfDay = serverWorld.getTimeOfDay();
         boolean night = timeOfDay >= NIGHT_START && timeOfDay < NIGHT_END;
 
-        // 「今晚」的锁存 / 解锁
+        // 「今晚」的锁存 / 解锁，以及「天亮随机熄灭」的起点锁存
         if (!night) {
             if (nightLatched) {
+                // 刚观察到天亮：天亮那一刻还亮着的灯，之后各自在 0~daydelay 秒内陆续熄灭
                 nightLatched = false;
+                dayLatched = true;
+                dayStartedAt = gameTime;
+                dayFadeLit = nightLitAtDawn(serverWorld, pos, config);
                 markDirty();
             }
         } else if (!nightLatched) {
             nightLatched = true;
+            dayLatched = false;      // 新的一晚开始，白天那段熄灭窗口作废
             nightStartedAt = gameTime;
             // world.getTime() 是游戏总刻数，除以 24000 得到「第几天」。
             // 夜里这段时间恰好整段落在同一天内，所以这就是「本晚」的编号。锁存住防永夜漂移。
@@ -222,37 +257,67 @@ public class LightBlockEntity extends BlockEntity {
     private boolean evaluate(ServerWorld world, BlockPos pos, LightConfig config, boolean night) {
         boolean wantLit = false;
         lastFlexRound = 0;
-        if (night && config.isYellowFlexableOn()) {
+        if (!night) {
+            // ---------------- 白天：天亮随机熄灭窗口 ----------------
+            // 天亮那一刻亮着的灯（dayFadeLit）各自等 0~daydelay 秒；还没轮到自己就继续亮着。
+            // daydelay = 0 ⇒ 恒 0 tick ⇒ 天一亮就全灭（和没有这个功能时一样）。
+            if (dayLatched && dayFadeLit) {
+                wantLit = (world.getTime() - dayStartedAt) < dayOffTicks(pos, nightIndex, config.getDayDelaySeconds());
+            }
+        } else if (config.isYellowFlexableOn()) {
             // /flexable on：天黑了就**脱离一切设定**（比例 / 延迟 / 重分配 / 偏差全不看了），
             // 每块按坐标散列出自己那段随机节奏独立乱闪。这是最高优先级的「黄灯亮法」，
             // 只被下面两个总闸压住。
             wantLit = flexableLit(pos, world.getTime());
         } else {
-            long elapsed = night ? (world.getTime() - nightStartedAt) : 0L;
-            if (night && elapsed >= nightDelayTicks) {
-                // 已经过了「本块第一次亮灯」的时刻
-                if (!config.isYellowFlexOn()) {
-                    wantLit = nightRoll;                       // 功能关着 → 一整夜只掷一次
-                } else {
-                    // 从「第一次亮灯」起算，叠加本块固定偏差，再求当前轮次
-                    long jitter = flexJitterTicks(pos, config.getYellowFlexJitterTicks());
-                    long sinceFirstLight = (elapsed - nightDelayTicks) - jitter;
-                    lastFlexRound = flexRoundAt(sinceFirstLight,
-                            config.getYellowFlexTimeTicks(), config.getYellowFlexGrowTicks());
-                    wantLit = lastFlexRound <= 0
-                            ? nightRoll                                    // 第 0 轮 = 入夜那次掷骰
-                            : flexRoundLit(pos, nightIndex, lastFlexRound, nightRoll,
-                                    config.getYellowFlexDir(), config.getYellowFlexPercent(),
-                                    config.getPercent(),
-                                    LightIndex.nightLitCount(world, nightIndex, config.getPercent()));
-                }
-            }
+            wantLit = nightLit(world, pos, config, world.getTime() - nightStartedAt);
         }
         // 总开关：全灭优先于分组开关；「黑着」时仍照常锁存状态，一开就立刻恢复节奏
         if (config.isForceOff() || !config.isYellowOn()) {
             wantLit = false;
         }
         return wantLit;
+    }
+
+    /**
+     * 夜里这一刻该不该亮（比例掷骰 + 随机延迟 + {@code /flex …} 重分配）。
+     *
+     * @param elapsed 已经入夜多少 tick（{@code gameTime - nightStartedAt}）。
+     *                做成参数是为了天亮那一瞬间能把它「冻」住再算一次（见 {@link #nightLitAtDawn}）。
+     */
+    private boolean nightLit(ServerWorld world, BlockPos pos, LightConfig config, long elapsed) {
+        if (elapsed < nightDelayTicks) {
+            // 还没到「本块第一次亮灯」的时刻
+            return false;
+        }
+        if (!config.isYellowFlexOn()) {
+            return nightRoll;                       // 功能关着 → 一整夜只掷一次
+        }
+        // 从「第一次亮灯」起算，叠加本块固定偏差，再求当前轮次
+        long jitter = flexJitterTicks(pos, config.getYellowFlexJitterTicks());
+        long sinceFirstLight = (elapsed - nightDelayTicks) - jitter;
+        lastFlexRound = flexRoundAt(sinceFirstLight,
+                config.getYellowFlexTimeTicks(), config.getYellowFlexGrowTicks());
+        if (lastFlexRound <= 0) {
+            return nightRoll;                       // 第 0 轮 = 入夜那次掷骰
+        }
+        return flexRoundLit(pos, nightIndex, lastFlexRound, nightRoll,
+                config.getYellowFlexDir(), config.getYellowFlexPercent(),
+                config.getPercent(),
+                LightIndex.nightLitCount(world, nightIndex, config.getPercent()));
+    }
+
+    /**
+     * 天亮那一瞬间这块亮不亮 —— 只有它亮着，天亮后才需要「随机熄灭」。
+     *
+     * <p>用的就是「假如这还是夜晚」的那套算法，只把「已等时长」冻在天亮这一刻，
+     * 所以结果与天亮前最后一 tick 完全一致（不会因为天亮就换成另一个值）。
+     */
+    private boolean nightLitAtDawn(ServerWorld world, BlockPos pos, LightConfig config) {
+        long now = world.getTime();
+        return config.isYellowFlexableOn()
+                ? flexableLit(pos, now)
+                : nightLit(world, pos, config, now - nightStartedAt);
     }
 
     /**
@@ -325,6 +390,9 @@ public class LightBlockEntity extends BlockEntity {
         nbt.putLong("NightIndex", nightIndex);
         nbt.putBoolean("NightRoll", nightRoll);
         nbt.putLong("NightDelayTicks", nightDelayTicks);
+        nbt.putBoolean("DayLatched", dayLatched);
+        nbt.putLong("DayStartedAt", dayStartedAt);
+        nbt.putBoolean("DayFadeLit", dayFadeLit);
     }
 
     @Override
@@ -336,6 +404,10 @@ public class LightBlockEntity extends BlockEntity {
         nightIndex = nbt.contains("NightIndex") ? nbt.getLong("NightIndex") : (nightStartedAt / 24000L);
         nightRoll = nbt.getBoolean("NightRoll");
         nightDelayTicks = nbt.getLong("NightDelayTicks");
+        // 老存档没有这三个 key ⇒ dayLatched=false：白天保持「不亮」，行为和以前完全一样
+        dayLatched = nbt.getBoolean("DayLatched");
+        dayStartedAt = nbt.getLong("DayStartedAt");
+        dayFadeLit = nbt.getBoolean("DayFadeLit");
     }
 
     // ---------------------------------------------------------------- 随机（确定性散列）
@@ -358,6 +430,19 @@ public class LightBlockEntity extends BlockEntity {
     public static long delayTicksOn(BlockPos pos, long nightIndex, int delaySeconds) {
         long maxTicks = Math.max(0L, delaySeconds) * TICKS_PER_SECOND;
         return Math.floorMod(splitmix(nightHash(pos, nightIndex)), maxTicks + 1L);
+    }
+
+    /**
+     * 天亮后这块要等多少 tick 才灭：0 ~ dayDelaySeconds*20。确定性随机，跨重启不变。
+     *
+     * <p>用「坐标 + 本晚编号 + 另一个盐」再散列一次，所以和 {@link #delayTicksOn}（天黑那个）
+     * <b>互不相关</b> —— 不会出现「亮得晚的也灭得晚」这种肉眼可辨的规律。
+     * 取值的上界就是 dayDelaySeconds*20，因此<b>天亮后最多等 dayDelaySeconds 秒必然全黑</b>。
+     * {@code dayDelaySeconds <= 0} ⇒ 恒 0 tick（天一亮立刻全灭）。
+     */
+    public static long dayOffTicks(BlockPos pos, long nightIndex, int dayDelaySeconds) {
+        long maxTicks = Math.max(0L, dayDelaySeconds) * TICKS_PER_SECOND;
+        return Math.floorMod(splitmix(nightHash(pos, nightIndex) ^ DAY_DELAY_SALT), maxTicks + 1L);
     }
 
     // ---------------------------------------------------------------- 黄灯重分配（第 r 轮）

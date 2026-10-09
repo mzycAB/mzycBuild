@@ -5,6 +5,8 @@ import com.mzyc.build.block.LightBlockEntity;
 import com.mzyc.build.block.RedLightBlock;
 import com.mzyc.build.block.RedLightBlockEntity;
 import com.mzyc.build.command.LightCommand;
+import com.mzyc.build.command.UiCommand;
+import com.mzyc.build.net.UiServer;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
@@ -34,7 +36,9 @@ import org.slf4j.LoggerFactory;
  *   <li>同理，只有拿着它的玩家能选中并破坏它；</li>
  *   <li>不可被替换，所以它所在的位置放不下别的方块；</li>
  *   <li>入夜（世界时间 13000~23000）每块独立掷骰（比例 {@code /light percent X}，默认 20%），
- *       掷中后再等 0~{@code /light delay Y} 秒的随机延迟才亮（默认上限 60 秒）；</li>
+ *       掷中后再等 0~{@code /light nightdelay Y} 秒的随机延迟才亮（默认上限 60 秒）；</li>
+ *   <li>天亮时也随机：天亮那一刻还亮着的灯各自在 0~{@code /light daydelay Y} 秒内陆续熄灭完
+ *       （默认 60 秒内全黑），不再是天一亮就一起灭；{@code /light daydelay 0} = 立刻全灭；</li>
  *   <li>亮起时的亮度可调（{@code /light light X}，0~15，默认 12），和原版光源方块 {@code level} 属性同一套语义；</li>
  *   <li>从「入夜第一次亮灯」起每 Y 秒重分配一次，<b>出厂默认就是开着的</b>：
  *       {@code /flex off}（熄灭模式，默认）⇒ 在还亮着的灯里每轮熄灭 X%（只灭不亮、越点亮越少，
@@ -57,11 +61,16 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>{@code /flexable on|off}</b>：开启后只要天黑了，黄灯就脱离 {@code /light percent}、
  * 延迟、{@code /flex …} 那套设定，改由每块按坐标散列出的随机节奏独立乱闪；
- * <b>{@code /light define default}</b>：把上面这套设置（比例 / 亮度 / 延迟 / 红灯时间渐变错开 /
+ * <b>{@code /light define default}</b>：把上面这套设置（比例 / 亮度 / 天黑天亮两个随机时长 / 红灯时间渐变错开 /
  * 黄灯重分配）一次性还原成出厂默认，也就是<b>第一次给存档装上模组时的默认</b>
  * （但不会顺手解开「全灭」总闸）。
  * 所有设置都存在<b>存档文件夹内部</b>（{@code <存档>/data/mzycbuild_light.dat}，服务端数据），
  * 跟存档走、与客户端无关。
+ *
+ * <p><b>{@code /mb help}</b>（{@code /MB help}、光秃秃的 {@code /mb} 同理）：打开设置界面 ——
+ * 上面那堆指令全做成了按钮和输入框，按功能分成几个二级界面（黄灯 / 红灯 / 黄灯夜间重分配 / 总开关）。
+ * 界面里的动作走自定义包在服务端静音执行，所以点按钮不会往聊天框刷「指令执行成功」；
+ * 反馈只在退出界面时汇总成一条 {@code UI执行成功} / {@code UI执行失败}。
  */
 public class MzycBuild implements ModInitializer {
     public static final String MOD_ID = "mzycbuild";
@@ -124,12 +133,18 @@ public class MzycBuild implements ModInitializer {
                     entries.add(RED_LIGHT_BLOCK_ITEM);
                 });
 
-        // /light [on|off] [h on|off] [-f on|off] percent|light|delay、/hlight flex|time|slow、/flex …（共用同一份世界设置）
-        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
-                LightCommand.register(dispatcher));
+        // /light [on|off] [h on|off] [-f on|off] percent|light|nightdelay|daydelay、/hlight flex|time|slow、
+        // /flex …、/mb help（打开设置界面）；全部共用同一份世界设置
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+            LightCommand.register(dispatcher);
+            UiCommand.register(dispatcher);
+        });
 
         // 跟踪「已加载的灯光方块实体」：指令改完设置要能当场刷新全场（含不 tick 的边界区块）
         LightIndex.register();
+
+        // 设置界面的服务端一半：收 UI 动作、静音执行指令、回传最新快照
+        UiServer.register();
 
         // 服务端兜底：没拿对应灯光方块的玩家即使发了破坏包也拆不掉它
         PlayerBlockBreakEvents.BEFORE.register((world, player, pos, state, blockEntity) -> {
@@ -142,14 +157,17 @@ public class MzycBuild implements ModInitializer {
             return true;
         });
 
-        LOGGER.info("[mzycBuild] light blocks registered (defaults: {}% lit / level {} / delay {}s"
+        LOGGER.info("[mzycBuild] light blocks registered (defaults: {}% lit / level {} / nightdelay {}s"
+                        + " / daydelay {}s"
                         + " || red on {}s / off {}s / slow-on {}s / slow-off {}s / flex {} X={}s"
                         + " || yellow-flex {} {} every {}s / percent {} / jitter {}s / grow {}s"
                         + " || flexable {})"
-                        + " commands /light [on|off] [h on|off] [-f on|off] [all on|off] [percent|light|delay X]"
+                        + " commands /light [on|off] [h on|off] [-f on|off] [all on|off]"
+                        + " [percent|light|nightdelay|daydelay X]"
                         + " [define default] + /hlight flex|time|slow + /flex … + /lightall [on|off]"
-                        + " + /flexable [on|off] + /alllight [on|off]",
+                        + " + /flexable [on|off] + /alllight [on|off] + /mb help",
                 LightConfig.DEFAULT_PERCENT, LightConfig.DEFAULT_LIGHT_LEVEL, LightConfig.DEFAULT_DELAY_SECONDS,
+                LightConfig.DEFAULT_DAY_DELAY_SECONDS,
                 LightConfig.formatCentis(LightConfig.DEFAULT_RED_TIME_ON_CENTIS),
                 LightConfig.formatCentis(LightConfig.DEFAULT_RED_TIME_OFF_CENTIS),
                 LightConfig.formatCentis(LightConfig.DEFAULT_RED_SLOW_ON_CENTIS),

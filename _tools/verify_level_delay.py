@@ -1,7 +1,7 @@
 """离线复核 LightBlockEntity 的 `rollsOn` / `delayTicksOn` 与 LightConfig 的夹取逻辑。
 
 这是 LightBlockEntity.java 里 splitmix64 散列的逐行 Python 复刻，用来在不开游戏的前提下
-验证黄灯那套设置（`/light light` 亮度、`/light delay` 延迟秒数、`/light percent` 比例）的行为：
+验证黄灯那套设置（`/light light` 亮度、`/light nightdelay` 延迟秒数、`/light percent` 比例）的行为：
 
   1. delayTicksOn 的取值范围必须是 [0, delaySeconds*20]，且分布均匀、确定性（同晚同坐标恒定）；
   2. rollsOn 的命中率要贴着 percent（0% 恒不亮、100% 恒亮）；
@@ -124,7 +124,8 @@ def main():
         ok &= got == want
 
     print("\n== 6. 默认值 ==")
-    defaults = {"percent": 30, "lightLevel": 12, "delaySeconds": 60,
+    defaults = {"percent": 20, "lightLevel": 12, "delaySeconds（nightdelay）": 60,
+                "dayDelaySeconds（daydelay）": 60,
                 "range": "0~100 / 0~15 / 0~600"}
     for k, v in defaults.items():
         print(f"  {k} = {v}")
