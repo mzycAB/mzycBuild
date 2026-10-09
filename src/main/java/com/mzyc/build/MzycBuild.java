@@ -33,23 +33,35 @@ import org.slf4j.LoggerFactory;
  *       （12 条棱、中间透明），因此只有手上拿着灯光方块的玩家看得见；</li>
  *   <li>同理，只有拿着它的玩家能选中并破坏它；</li>
  *   <li>不可被替换，所以它所在的位置放不下别的方块；</li>
- *   <li>入夜（世界时间 13000~23000）每块独立掷骰（比例 {@code /light percent X}，默认 30%），
- *       掷中后再等 0~{@code /light delay Y} 秒的随机延迟才亮（默认上限 60 秒），亮就整夜亮着，天亮自动熄灭；</li>
+ *   <li>入夜（世界时间 13000~23000）每块独立掷骰（比例 {@code /light percent X}，默认 20%），
+ *       掷中后再等 0~{@code /light delay Y} 秒的随机延迟才亮（默认上限 60 秒）；</li>
  *   <li>亮起时的亮度可调（{@code /light light X}，0~15，默认 12），和原版光源方块 {@code level} 属性同一套语义；</li>
- *   <li>开 {@code /flex on time Y [percent X]} 后，从「入夜第一次亮灯」起每 Y 秒洗牌一次：
- *       给了 {@code percent X} ⇒ 在还亮着的灯里每轮熄灭 X%（只灭不亮、越点越暗，剩得不够一盏时全灭）；
- *       没给 ⇒ 对全部黄灯按 {@code /light percent} 重新分配点亮 / 熄灭（有灭也有亮）；
+ *   <li>从「入夜第一次亮灯」起每 Y 秒重分配一次，<b>出厂默认就是开着的</b>：
+ *       {@code /flex off}（熄灭模式，默认）⇒ 在还亮着的灯里每轮熄灭 X%（只灭不亮、越点亮越少，
+ *       剩得不够一盏时全灭）—— 所以默认夜里灯会每 60 秒暗掉 10%，不会亮一整夜；
+ *       {@code /flex on}（点亮模式）⇒ 对全部黄灯按 {@code /light percent} 重新分配点亮 / 熄灭（有灭也有亮）；
+ *       {@code /flex all off} 彻底关掉重分配（整夜只掷一次骰）；
  *       {@code /flex flex X} 给每块 ±X 秒偏差，{@code /flex grow X} 让每轮间隔递增 / 递减（可为负）。</li>
  * </ul>
  *
  * <p>另有<b>红色灯光方块</b>（{@code mzycbuild:red_light_block}）：可见性 / 穿行 / 占位行为与黄方块完全一致，
  * 线框是红色；但发光规律固定 —— 夜里按「亮起时间 / 熄灭时间」循环（{@code /hlight time on|off X}，默认各 2.00 秒），
- * 两端各带可调的明暗渐变（{@code /hlight slow on|off X}，默认各 0.10 秒），相位锁在世界刻数上，
- * 所以默认全世界所有红方块同步闪烁；用 {@code /hlight flex on X} 可改成「每块各自错开」。
+ * 两端各带可调的明暗渐变（{@code /hlight slow on|off X}，默认各 0.50 秒），相位锁在世界刻数上，
+ * 默认每块按坐标错开闪（{@code /hlight flex on 1}）；用 {@code /hlight flex off} 可改成「全世界同步」。
  *
  * <p><b>总开关</b>：{@code /light on|off} 只管黄灯，{@code /light h on|off} 只管红灯，
- * {@code /light -f on|off} 是「全灭」——**无论什么情况**，{@code -f off} 当场熄灭全场黄灯和红灯，
- * 直到 {@code -f on}。所有写指令改完都会立即刷新全场已加载的灯光方块。
+ * {@code /light -f on|off}（等价写法 {@code /light all on|off}、{@code /lightall on|off}、
+ * {@code /alllight on|off}，四者同一个总闸）
+ * 是「全灭」——**无论什么情况**，关掉后当场熄灭全场黄灯和红灯（含开了纯随机乱闪的），
+ * 直到重新打开。所有写指令改完都会立即刷新全场已加载的灯光方块。
+ *
+ * <p><b>{@code /flexable on|off}</b>：开启后只要天黑了，黄灯就脱离 {@code /light percent}、
+ * 延迟、{@code /flex …} 那套设定，改由每块按坐标散列出的随机节奏独立乱闪；
+ * <b>{@code /light define default}</b>：把上面这套设置（比例 / 亮度 / 延迟 / 红灯时间渐变错开 /
+ * 黄灯重分配）一次性还原成出厂默认，也就是<b>第一次给存档装上模组时的默认</b>
+ * （但不会顺手解开「全灭」总闸）。
+ * 所有设置都存在<b>存档文件夹内部</b>（{@code <存档>/data/mzycbuild_light.dat}，服务端数据），
+ * 跟存档走、与客户端无关。
  */
 public class MzycBuild implements ModInitializer {
     public static final String MOD_ID = "mzycbuild";
@@ -132,9 +144,11 @@ public class MzycBuild implements ModInitializer {
 
         LOGGER.info("[mzycBuild] light blocks registered (defaults: {}% lit / level {} / delay {}s"
                         + " || red on {}s / off {}s / slow-on {}s / slow-off {}s / flex {} X={}s"
-                        + " || yellow-flex {} every {}s / percent {} / jitter {}s / grow {}s)"
-                        + " commands /light [on|off] [h on|off] [-f on|off] percent|light|delay"
-                        + " + /hlight flex|time|slow + /flex",
+                        + " || yellow-flex {} {} every {}s / percent {} / jitter {}s / grow {}s"
+                        + " || flexable {})"
+                        + " commands /light [on|off] [h on|off] [-f on|off] [all on|off] [percent|light|delay X]"
+                        + " [define default] + /hlight flex|time|slow + /flex … + /lightall [on|off]"
+                        + " + /flexable [on|off] + /alllight [on|off]",
                 LightConfig.DEFAULT_PERCENT, LightConfig.DEFAULT_LIGHT_LEVEL, LightConfig.DEFAULT_DELAY_SECONDS,
                 LightConfig.formatCentis(LightConfig.DEFAULT_RED_TIME_ON_CENTIS),
                 LightConfig.formatCentis(LightConfig.DEFAULT_RED_TIME_OFF_CENTIS),
@@ -143,9 +157,11 @@ public class MzycBuild implements ModInitializer {
                 LightConfig.DEFAULT_RED_FLEX_ON ? "on" : "off",
                 LightConfig.formatCentis(LightConfig.DEFAULT_RED_FLEX_CENTIS),
                 LightConfig.DEFAULT_YELLOW_FLEX_ON ? "on" : "off",
+                LightConfig.DEFAULT_YELLOW_FLEX_DIR == LightConfig.FLEX_DIR_LIGHT ? "light" : "extinguish",
                 LightConfig.formatCentis(LightConfig.DEFAULT_YELLOW_FLEX_TIME_CENTIS),
-                LightConfig.YELLOW_FLEX_PERCENT_UNSET,
+                LightConfig.DEFAULT_YELLOW_FLEX_PERCENT,
                 LightConfig.formatCentis(LightConfig.DEFAULT_YELLOW_FLEX_JITTER_CENTIS),
-                LightConfig.formatCentis(LightConfig.DEFAULT_YELLOW_FLEX_GROW_CENTIS));
+                LightConfig.formatCentis(LightConfig.DEFAULT_YELLOW_FLEX_GROW_CENTIS),
+                LightConfig.DEFAULT_YELLOW_FLEXABLE_ON ? "on" : "off");
     }
 }

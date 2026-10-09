@@ -23,33 +23,41 @@ import java.util.function.ToIntFunction;
  *
  * <h2>黄 / 通用（{@code /light …}）</h2>
  * <ul>
- *   <li>{@code /light percent X} —— 夜晚点亮比例（%，0~100，默认 30）</li>
+ *   <li>{@code /light percent X} —— 夜晚点亮比例（%，0~100，默认 20）</li>
  *   <li>{@code /light light X} —— 灯光亮度（0~15，和原版光源方块同一套语义，默认 12）</li>
  *   <li>{@code /light delay Y} —— 点亮延迟上限（秒，0~600，默认 60；实际延迟在 0~Y 秒之间随机）</li>
  *   <li>{@code /light on|off} —— 黄灯总开关（默认开）</li>
  *   <li>{@code /light h on|off} —— 红灯总开关（默认开）</li>
- *   <li>{@code /light -f on|off} —— 「全灭」：关掉后黄 / 红一律不亮，无视一切设置，直到 {@code /light -f on}</li>
+ *   <li>{@code /light -f on|off} / {@code /light all on|off} / {@code /lightall on|off} /
+ *       {@code /alllight on|off} —— 「全灭」：四者写同一个总闸，关掉后黄 / 红一律不发光，
+ *       无视一切设置（含 {@code /flexable}），直到重新打开</li>
+ *   <li>{@code /light define default} —— 把上面所有设置一次性还原成出厂默认（见 {@link LightConfig#resetToDefaults()}）</li>
+ * </ul>
+ *
+ * <h2>纯随机乱闪（{@code /flexable …}）</h2>
+ * <ul>
+ *   <li>{@code /flexable on|off} —— 开：天黑了黄灯就脱离一切设定、每块各自随机亮灭（默认关）</li>
  * </ul>
  *
  * <h2>红灯（{@code /hlight …}，X 均支持 2 位小数）</h2>
  * <ul>
  *   <li>{@code /hlight time on X} —— 亮起时间（默认 2.00 秒）</li>
  *   <li>{@code /hlight time off X} —— 熄灭时间（默认 2.00 秒）</li>
- *   <li>{@code /hlight slow on X} —— 灭→亮渐变时间（默认 0.10 秒）</li>
- *   <li>{@code /hlight slow off X} —— 亮→灭渐变时间（默认 0.10 秒）</li>
- *   <li>{@code /hlight flex on|off [X]} —— 是否「错开」每块红方块的亮/灭循环起点 + 随机错开时长（默认关 / 4.00 秒）</li>
+ *   <li>{@code /hlight slow on X} —— 灭→亮渐变时间（默认 0.50 秒）</li>
+ *   <li>{@code /hlight slow off X} —— 亮→灭渐变时间（默认 0.50 秒）</li>
+ *   <li>{@code /hlight flex on|off [X]} —— 是否「错开」每块红方块的亮/灭循环起点 + 随机错开时长（默认<b>开</b> / 1.00 秒）</li>
  * </ul>
  *
- * <h2>黄灯夜间随机重分配（{@code /flex …}）</h2>
+ * <h2>黄灯夜间随机重分配（{@code /flex …}）—— 功能开关与方向是两个正交的开关</h2>
  * <ul>
- *   <li>{@code /flex on time Y percent X} —— 开：入夜第一次亮灯后每 Y 秒，
+ *   <li>{@code /flex off time Y [percent X]} —— <b>熄灭模式</b>（并打开功能）：入夜第一次亮灯后每 Y 秒，
  *       在「本晚被点亮」的灯里熄灭**当前还亮着**的 X%（只灭不亮，越到后半夜越暗；
- *       剩得不够一盏时一次全灭；X=0 不变、X=100 第 1 轮全灭）</li>
- *   <li>{@code /flex on time Y} —— 开：每 Y 秒对全部黄灯按 {@code /light percent} 重新分配一次点亮 / 熄灭
- *       （**有熄灭也有点亮**）</li>
- *   <li>{@code /flex off} —— 关：一整夜只掷一次骰</li>
- *   <li>{@code /flex flex X} —— 每块 ±X 秒的固定偏差，避免同一瞬间一起变</li>
- *   <li>{@code /flex grow X} —— 每轮间隔递增量：第 k 轮间隔 = Y + (k-1)·X；可填负数（60→55→50…）</li>
+ *       剩得不够一盏时一次全灭；X=0 不变、X=100 第 1 轮全灭）。<b>这是出厂默认</b>（Y=60、X=10）</li>
+ *   <li>{@code /flex on time Y [percent X]} —— <b>点亮模式</b>（并打开功能）：每 Y 秒对全部黄灯
+ *       按 {@code /light percent} 重新分配一次点亮 / 熄灭（**有熄灭也有点亮**）</li>
+ *   <li>{@code /flex all off} —— 彻底关闭 flex 功能（一整夜只掷一次骰）；{@code /flex all on} 重新打开</li>
+ *   <li>{@code /flex flex X} —— 每块 ±X 秒的固定偏差，避免同一瞬间一起变（默认 2.00 秒）</li>
+ *   <li>{@code /flex grow X} —— 每轮间隔递增量：第 k 轮间隔 = Y + (k-1)·X；可填负数（60→55→50…），默认 0</li>
  * </ul>
  *
  * <p><b>所有写指令都是「立即生效」的</b>：写完当场把全场已加载的灯光方块刷新一遍
@@ -58,11 +66,14 @@ import java.util.function.ToIntFunction;
  *
  * <p>不带参数的写法都是**查询**，只回当前数值：
  * <ul>
- *   <li>{@code /light} → {@code 比例 亮度 延迟 黄开关 红开关 全灭}（如 {@code 30 12 60 1 1 0}）</li>
+ *   <li>{@code /light} → {@code 比例 亮度 延迟 黄开关 红开关 全灭}（如 {@code 20 12 60 1 1 0}）</li>
  *   <li>{@code /light h}/{@code /light -f} → 开关值 {@code 1}/{@code 0}</li>
+ *   <li>{@code /lightall} / {@code /alllight} → 全灭开关值 {@code 1}/{@code 0}；{@code /flexable} → 乱闪开关值 {@code 1}/{@code 0}</li>
  *   <li>{@code /hlight} → 六个数（开关 错开值 亮起值 熄灭值 渐变亮值 渐变灭值）；
- *       {@code /hlight flex} → {@code 1 4.00}；{@code /hlight time}/{@code /hlight slow} → {@code 2.00 2.00}</li>
- *   <li>{@code /flex} → {@code 开关 间隔 熄灭比例 偏差 递增}（如 {@code 1 60.00 50 0.00 0.00}；比例 {@code -1} = 未设）</li>
+ *       {@code /hlight flex} → {@code 1 1.00}；{@code /hlight time}/{@code /hlight slow} → {@code 2.00 2.00}</li>
+ *   <li>{@code /flex} → {@code 开关 方向 间隔 熄灭比例 偏差 递增}
+ *       （如出厂默认 {@code 1 1 60.00 10 2.00 0.00}；方向 {@code 1} = 熄灭、{@code 2} = 点亮）；
+ *       {@code /flex all} → 总开关值 {@code 1}/{@code 0}</li>
  * </ul>
  *
  * <p>用户定的铁规矩：<b>指令反馈只回「指令执行成功」/「指令执行失败」，查询只回数值。</b>
@@ -81,6 +92,9 @@ public final class LightCommand {
         dispatcher.register(buildLight());
         dispatcher.register(buildHlight());
         dispatcher.register(buildFlex());
+        dispatcher.register(buildLightAll());
+        dispatcher.register(buildAllLightAlias());
+        dispatcher.register(buildFlexable());
     }
 
     // ---------------------------------------------------------------- /light
@@ -111,6 +125,19 @@ public final class LightCommand {
                                 .executes(context -> applyBoolean(context, config -> config.setForceOff(true))))
                         .then(CommandManager.literal("off")
                                 .executes(context -> applyBoolean(context, config -> config.setForceOff(false)))))
+
+                // 「全灭」的等价写法：/light all [on|off]（和 /light -f、/lightall 共用同一个总闸）
+                .then(CommandManager.literal("all")
+                        .executes(context -> queryBoolean(context, LightConfig::isForceOff))
+                        .then(CommandManager.literal("on")
+                                .executes(context -> applyBoolean(context, config -> config.setForceOff(true))))
+                        .then(CommandManager.literal("off")
+                                .executes(context -> applyBoolean(context, config -> config.setForceOff(false)))))
+
+                // 出厂默认：/light define default
+                .then(CommandManager.literal("define")
+                        .then(CommandManager.literal("default")
+                                .executes(LightCommand::resetDefaults)))
 
                 // 整数参数：percent | light | delay
                 .then(intLeaf("percent", LightConfig.MIN_PERCENT, LightConfig.MAX_PERCENT,
@@ -169,17 +196,27 @@ public final class LightCommand {
 
     private static LiteralArgumentBuilder<ServerCommandSource> buildFlex() {
         return CommandManager.literal("flex")
-                // 光秃秃 /flex = 查询：开关 间隔 熄灭比例 偏差 递增
+                // 光秃秃 /flex = 查询：开关 方向 间隔 熄灭比例 偏差 递增
                 .executes(LightCommand::queryFlexAll)
 
-                // /flex on [time Y [percent X]]
+                // /flex on [time Y [percent X]] —— 点亮模式（生效）
                 .then(CommandManager.literal("on")
-                        .executes(context -> setFlexSwitch(context, true))
-                        .then(flexTimeTree(true)))
-                // /flex off [time Y [percent X]]
+                        .executes(context -> setFlexMode(context, LightConfig.FLEX_DIR_LIGHT))
+                        .then(flexTimeTree(LightConfig.FLEX_DIR_LIGHT)))
+                // /flex off [time Y [percent X]] —— 熄灭模式（生效）
                 .then(CommandManager.literal("off")
-                        .executes(context -> setFlexSwitch(context, false))
-                        .then(flexTimeTree(false)))
+                        .executes(context -> setFlexMode(context, LightConfig.FLEX_DIR_EXTINGUISH))
+                        .then(flexTimeTree(LightConfig.FLEX_DIR_EXTINGUISH)))
+
+                // /flex all [on|off] —— 功能总开关：
+                //   /flex all off = 彻底关闭 flex 功能（整夜只掷一次骰）
+                //   /flex all on  = 重新打开（沿用上次的方向）
+                .then(CommandManager.literal("all")
+                        .executes(context -> queryBoolean(context, LightConfig::isYellowFlexOn))
+                        .then(CommandManager.literal("on")
+                                .executes(context -> setFlexSwitch(context, true)))
+                        .then(CommandManager.literal("off")
+                                .executes(context -> setFlexSwitch(context, false))))
 
                 // /flex flex X —— 偏差
                 .then(CommandManager.literal("flex")
@@ -196,15 +233,71 @@ public final class LightCommand {
                                         StringArgumentType.getString(context, "X")))));
     }
 
-    /** 共用的 {@code time Y [percent X]} 子树；{@code enable} 决定最终把总开关设成开还是关。 */
-    private static LiteralArgumentBuilder<ServerCommandSource> flexTimeTree(boolean enable) {
+    // ---------------------------------------------------------------- /lightall（全灭总闸）
+
+    /**
+     * {@code /lightall [on|off]} —— 「强制不发光」总闸，写的是和 {@code /light -f}、
+     * {@code /light all} <b>同一份</b> {@code forceOff} 状态（互为别名）。
+     *
+     * <p>{@code off} 一按下去，黄 / 红方块当场一律不发光（不管白天还是夜晚、不管其它任何设置，
+     * 连 {@code /flexable on} 的纯随机乱闪也压得住），直到输入 {@code /lightall on}（或等价的
+     * {@code /light -f on} / {@code /light all on}）才恢复。
+     *
+     * <p>不带参数 = 查询，只回 {@code 1}/{@code 0}。
+     */
+    private static LiteralArgumentBuilder<ServerCommandSource> buildLightAll() {
+        return forceOffTree("lightall");
+    }
+
+    /**
+     * {@code /alllight [on|off]} —— 和 {@code /lightall} 完全等价的写法。
+     *
+     * <p>纯粹是防手滑：用户 2026-10-09 反馈「输入 alllight off 之后灯还亮着」——
+     * 十有八九是把词序写反了（{@code alllight} vs {@code lightall}），原版对不存在的指令
+     * 只会回一句「未知指令」，灯当然照旧亮。两个名字都注册上，写错哪半边都照样管用。
+     */
+    private static LiteralArgumentBuilder<ServerCommandSource> buildAllLightAlias() {
+        return forceOffTree("alllight");
+    }
+
+    /** 全灭总闸的指令树（{@code lightall} / {@code alllight} / {@code -f} / {@code all} 共用同一份状态）。 */
+    private static LiteralArgumentBuilder<ServerCommandSource> forceOffTree(String name) {
+        return CommandManager.literal(name)
+                .executes(context -> queryBoolean(context, LightConfig::isForceOff))
+                .then(CommandManager.literal("on")
+                        .executes(context -> applyBoolean(context, config -> config.setForceOff(true))))
+                .then(CommandManager.literal("off")
+                        .executes(context -> applyBoolean(context, config -> config.setForceOff(false))));
+    }
+
+    // ---------------------------------------------------------------- /flexable（纯随机乱闪）
+
+    /**
+     * {@code /flexable [on|off]} —— 黄灯「纯随机乱闪」：开启后只要天黑了，黄灯的亮灭就彻底
+     * 脱离 {@code /light percent}、{@code /light delay}、{@code /flex …} 这套设定，每块按坐标
+     * 散列出的随机节奏独立亮灭（见 {@code LightBlockEntity.flexableLit}）。
+     *
+     * <p>压得住它的只有 {@code /lightall off}（= {@code /light -f off}）和 {@code /light off}。
+     * 不带参数 = 查询，只回 {@code 1}/{@code 0}。
+     */
+    private static LiteralArgumentBuilder<ServerCommandSource> buildFlexable() {
+        return CommandManager.literal("flexable")
+                .executes(context -> queryBoolean(context, LightConfig::isYellowFlexableOn))
+                .then(CommandManager.literal("on")
+                        .executes(context -> applyBoolean(context, config -> config.setYellowFlexableOn(true))))
+                .then(CommandManager.literal("off")
+                        .executes(context -> applyBoolean(context, config -> config.setYellowFlexableOn(false))));
+    }
+
+    /** 共用的 {@code time Y [percent X]} 子树；{@code dir} 决定这次要切到哪个方向。 */
+    private static LiteralArgumentBuilder<ServerCommandSource> flexTimeTree(int dir) {
         return CommandManager.literal("time")
                 .then(CommandManager.argument("Y", StringArgumentType.word())
-                        .executes(context -> applyFlex(context, enable,
+                        .executes(context -> applyFlex(context, dir,
                                 StringArgumentType.getString(context, "Y"), null))
                         .then(CommandManager.literal("percent")
                                 .then(CommandManager.argument("X", StringArgumentType.word())
-                                        .executes(context -> applyFlex(context, enable,
+                                        .executes(context -> applyFlex(context, dir,
                                                 StringArgumentType.getString(context, "Y"),
                                                 StringArgumentType.getString(context, "X"))))));
     }
@@ -261,10 +354,11 @@ public final class LightCommand {
         return 1;
     }
 
-    /** {@code /flex}：回「开关 间隔 熄灭比例 偏差 递增」（比例 -1 = 未设）。 */
+    /** {@code /flex}：回「开关 方向 间隔 熄灭比例 偏差 递增」（方向 1 = 熄灭、2 = 点亮）。 */
     private static int queryFlexAll(CommandContext<ServerCommandSource> context) {
         LightConfig config = LightConfig.get(context.getSource().getWorld());
         String value = (config.isYellowFlexOn() ? "1 " : "0 ")
+                + config.getYellowFlexDir() + " "
                 + LightConfig.formatCentis(config.getYellowFlexTimeCentis()) + " "
                 + config.getYellowFlexPercent() + " "
                 + LightConfig.formatCentis(config.getYellowFlexJitterCentis()) + " "
@@ -310,21 +404,45 @@ public final class LightCommand {
         return ok(context);
     }
 
-    /** {@code /flex on|off}（不带 time）：只切开关。 */
+    /** {@code /light define default}：把全部设置一次性还原成出厂默认，并当场刷新全场。 */
+    private static int resetDefaults(CommandContext<ServerCommandSource> context) {
+        LightConfig.get(context.getSource().getWorld()).resetToDefaults();
+        return ok(context);
+    }
+
+    /** {@code /flex all on|off}：只切功能总开关（方向不变，上次是熄灭就还是熄灭）。 */
     private static int setFlexSwitch(CommandContext<ServerCommandSource> context, boolean enable) {
         LightConfig config = LightConfig.get(context.getSource().getWorld());
         config.setYellowFlexOn(enable);
         return ok(context);
     }
 
-    /** {@code /flex on|off time Y [percent X]}：写入间隔（可选比例）并切开关。先全部校验再落盘。 */
-    private static int applyFlex(CommandContext<ServerCommandSource> context, boolean enable,
+    /**
+     * {@code /flex on|off}（不带 time）：切方向，并且把功能打开。
+     *
+     * <p>按用户定的语义：{@code /flex off} = 熄灭模式（生效），{@code /flex on} = 点亮模式（生效）。
+     */
+    private static int setFlexMode(CommandContext<ServerCommandSource> context, int dir) {
+        LightConfig config = LightConfig.get(context.getSource().getWorld());
+        config.setYellowFlexDir(dir);
+        config.setYellowFlexOn(true);
+        return ok(context);
+    }
+
+    /**
+     * {@code /flex on|off time Y [percent X]}：写入间隔（可选比例）并切到该方向、同时打开功能。
+     * 先全部校验再落盘。
+     *
+     * <p>{@code percent} 在熄灭模式下是「每轮熄灭还亮着的 X%」；在点亮模式下只存不用
+     * （留给熄灭模式），所以两个方向都接受这个参数。
+     */
+    private static int applyFlex(CommandContext<ServerCommandSource> context, int dir,
                                  String rawTime, String rawPercent) {
         Integer timeCentis = parseCentis(rawTime,
                 LightConfig.MIN_YELLOW_FLEX_TIME_CENTIS, LightConfig.MAX_RED_CENTIS);
         Integer percent = null;
         if (rawPercent != null) {
-            percent = parseInRange(rawPercent, LightConfig.YELLOW_FLEX_PERCENT_UNSET, 100);
+            percent = parseInRange(rawPercent, 0, 100);
         }
         if (timeCentis == null || (rawPercent != null && percent == null)) {
             context.getSource().sendError(FEEDBACK_FAIL);
@@ -335,7 +453,8 @@ public final class LightCommand {
         if (percent != null) {
             config.setYellowFlexPercent(percent);
         }
-        config.setYellowFlexOn(enable);
+        config.setYellowFlexDir(dir);
+        config.setYellowFlexOn(true);
         return ok(context);
     }
 

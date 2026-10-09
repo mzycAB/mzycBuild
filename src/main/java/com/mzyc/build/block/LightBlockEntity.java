@@ -45,17 +45,19 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  * 锁存值随方块实体存进 NBT，所以区块卸载重载、重启游戏都不会重新掷骰。
  *
- * <h2>黄灯的「夜间随机重分配」（{@code /flex on|off …}）</h2>
- * 默认关闭，一整夜只掷一次骰（老行为）。开启后：
+ * <h2>黄灯的「夜间随机重分配」（{@code /flex …}）</h2>
+ * <b>出厂默认是开着的、方向为熄灭</b>（{@code /flex off time 60 percent 10}）——
+ * 也就是夜里灯亮起来之后每 60 秒灭掉 10% 还亮着的，不会亮一整夜。
+ * 两个正交的开关：<b>功能是否生效</b>（{@code /flex all on|off}）+ <b>方向</b>（{@code /flex off|on}）：
  * <ol>
  *   <li><b>第 0 轮</b>＝入夜那次掷骰（{@code /light percent} 的比例）＋随机延迟 —— 也就是「第一次亮灯」；</li>
  *   <li>从「本块第一次亮灯」起算，每隔 {@code time Y} 秒进入下一轮：
  *       <ul>
- *         <li>{@code percent X} 指定时 —— 在「本晚被点亮」的灯里，每轮熄灭**当前还亮着**的 X%
+ *         <li><b>熄灭模式</b>（{@code /flex off}）—— 在「本晚被点亮」的灯里，每轮熄灭**当前还亮着**的 X%
  *             （只灭不亮：灭了的不会自己再亮，也绝不会点亮本晚原本没亮的灯；越到后半夜越暗）。
  *             X=0 不变、X=100 第 1 轮全灭。收尾时如果剩下的灯少到「X% 不足一盏」就**一次全灭**，
  *             不留零星鬼火（见 {@link #flexEndRound}）。</li>
- *         <li>未指定 percent —— 对全部黄灯按 {@code /light percent} **重新分配**一次点亮 / 熄灭
+ *         <li><b>点亮模式</b>（{@code /flex on}）—— 对全部黄灯按 {@code /light percent} **重新分配**一次点亮 / 熄灭
  *             （**有熄灭也有点亮**，本晚没亮的也可能被点亮）。</li>
  *       </ul></li>
  *   <li>{@code flex X} 给每块一个固定偏差 ±X 秒，避免所有方块同一瞬间一起变；</li>
@@ -65,9 +67,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * 轮次和结果都是**确定性纯函数**（坐标 + 夜晚编号 + 轮次 → 结果），
  * 不存任何「每块状态」，所以存档重启 / 区块卸载重载后表现完全一致。
  *
- * <p><b>总开关</b>（{@code /light …}）：{@code /light -f off} 时黄/红一律不亮（无视其它设置）；
- * {@code /light off} 只关黄灯；{@code /light h off} 只关红灯。黑灯状态下仍然照常锁存「今晚」状态，
+ * <p><b>总开关</b>（{@code /light …}）：{@code /light -f off}（= {@code /lightall off}）
+ * 时黄/红一律不亮（无视其它设置，含 {@code /flexable}）；{@code /light off} 只关黄灯；
+ * {@code /light h off} 只关红灯。黑灯状态下仍然照常锁存「今晚」状态，
  * 一旦重新打开就立刻按原有节奏恢复。
+ *
+ * <p><b>{@code /flexable on}</b>（默认关）：天黑了黄灯就<b>彻底脱离</b>上面这套比例 / 延迟 /
+ * 重分配设定，改由每块按坐标散列出的随机节奏独立乱闪（见 {@link #flexableLit}）——
+ * 优先级只低于上面那两个总闸。
  * <b>开关是「立即」生效的</b>：指令写完会当场把全场已加载的方块刷新一遍（见 {@code LightIndex}），
  * 既不等黄灯那 5 tick 节流，也能灭掉超出模拟距离、根本不会 tick 的边界区块方块。
  *
@@ -99,6 +106,12 @@ public class LightBlockEntity extends BlockEntity {
     private static final long FLEX_JITTER_SALT = 0x464C45585F4A4954L;
     /** 「第几轮被熄灭」散列用的盐（"EXTINGSH" 的 ASCII）。 */
     private static final long EXTINGUISH_SALT = 0x455854494E475348L;
+    /** 纯随机乱闪（{@code /flexable on}）散列用的盐（"FLEXABLE" 的 ASCII）。 */
+    private static final long FLEXABLE_SALT = 0x464C455841424C45L;
+
+    /** 乱闪时每块方块的「亮」持续时间范围（tick）：4~24 tick（0.20~1.20 秒）。 */
+    private static final long FLEXABLE_MIN_LIT_TICKS = 4L;
+    private static final long FLEXABLE_SPAN_TICKS = 21L;
 
     // ---------------- 跨 tick / 跨存档保留的「今晚」状态（存进 NBT） ----------------
 
@@ -149,13 +162,14 @@ public class LightBlockEntity extends BlockEntity {
         if (!(world instanceof ServerWorld serverWorld)) {
             return;
         }
-        // 每 5 tick 才真正判定一次
+        // 每 5 tick 才真正判定一次；但开了「纯随机乱闪」就每 tick 都判定
+        // （乱闪的最短亮/灭只有 4 tick，按 5 tick 采样会被整段跳过，看着像卡住）
         long gameTime = serverWorld.getTime();
-        if (gameTime % CHECK_INTERVAL != 0L) {
+        LightConfig config = LightConfig.get(serverWorld);
+        if (gameTime % CHECK_INTERVAL != 0L && !config.isYellowFlexableOn()) {
             return;
         }
 
-        LightConfig config = LightConfig.get(serverWorld);
         long timeOfDay = serverWorld.getTimeOfDay();
         boolean night = timeOfDay >= NIGHT_START && timeOfDay < NIGHT_END;
 
@@ -206,24 +220,32 @@ public class LightBlockEntity extends BlockEntity {
      * 保证「指令立即生效」走出来的结果和正常 tick 完全一致（不会出现两种口径）。
      */
     private boolean evaluate(ServerWorld world, BlockPos pos, LightConfig config, boolean night) {
-        long elapsed = night ? (world.getTime() - nightStartedAt) : 0L;
         boolean wantLit = false;
         lastFlexRound = 0;
-        if (night && elapsed >= nightDelayTicks) {
-            // 已经过了「本块第一次亮灯」的时刻
-            if (!config.isYellowFlexOn()) {
-                wantLit = nightRoll;                       // 关着 → 一整夜只掷一次
-            } else {
-                // 从「第一次亮灯」起算，叠加本块固定偏差，再求当前轮次
-                long jitter = flexJitterTicks(pos, config.getYellowFlexJitterTicks());
-                long sinceFirstLight = (elapsed - nightDelayTicks) - jitter;
-                lastFlexRound = flexRoundAt(sinceFirstLight,
-                        config.getYellowFlexTimeTicks(), config.getYellowFlexGrowTicks());
-                wantLit = lastFlexRound <= 0
-                        ? nightRoll                                    // 第 0 轮 = 入夜那次掷骰
-                        : flexRoundLit(pos, nightIndex, lastFlexRound, nightRoll,
-                                config.getYellowFlexPercent(), config.getPercent(),
-                                LightIndex.nightLitCount(world, nightIndex, config.getPercent()));
+        if (night && config.isYellowFlexableOn()) {
+            // /flexable on：天黑了就**脱离一切设定**（比例 / 延迟 / 重分配 / 偏差全不看了），
+            // 每块按坐标散列出自己那段随机节奏独立乱闪。这是最高优先级的「黄灯亮法」，
+            // 只被下面两个总闸压住。
+            wantLit = flexableLit(pos, world.getTime());
+        } else {
+            long elapsed = night ? (world.getTime() - nightStartedAt) : 0L;
+            if (night && elapsed >= nightDelayTicks) {
+                // 已经过了「本块第一次亮灯」的时刻
+                if (!config.isYellowFlexOn()) {
+                    wantLit = nightRoll;                       // 功能关着 → 一整夜只掷一次
+                } else {
+                    // 从「第一次亮灯」起算，叠加本块固定偏差，再求当前轮次
+                    long jitter = flexJitterTicks(pos, config.getYellowFlexJitterTicks());
+                    long sinceFirstLight = (elapsed - nightDelayTicks) - jitter;
+                    lastFlexRound = flexRoundAt(sinceFirstLight,
+                            config.getYellowFlexTimeTicks(), config.getYellowFlexGrowTicks());
+                    wantLit = lastFlexRound <= 0
+                            ? nightRoll                                    // 第 0 轮 = 入夜那次掷骰
+                            : flexRoundLit(pos, nightIndex, lastFlexRound, nightRoll,
+                                    config.getYellowFlexDir(), config.getYellowFlexPercent(),
+                                    config.getPercent(),
+                                    LightIndex.nightLitCount(world, nightIndex, config.getPercent()));
+                }
             }
         }
         // 总开关：全灭优先于分组开关；「黑着」时仍照常锁存状态，一开就立刻恢复节奏
@@ -234,16 +256,34 @@ public class LightBlockEntity extends BlockEntity {
     }
 
     /**
+     * {@code /flexable on} 时这块方块此刻亮不亮 —— <b>纯随机</b>：每块按坐标散列出各自的
+     * 「亮多久 / 灭多久 / 相位」，于是全场像随便撒了一把星星一样各闪各的，
+     * 既不看 {@code /light percent}，也不看延迟和重分配。
+     *
+     * <p>用确定性散列而不是 {@code Random}：一是**免状态**（不用存 NBT、区块卸载重载不丢），
+     * 二是和整包其它随机一致 —— 重进世界不会换一种闪法。视觉上就是毫无规律地乱闪。
+     */
+    public static boolean flexableLit(BlockPos pos, long gameTime) {
+        long h = Hash.of(pos.asLong(), FLEXABLE_SALT);
+        long litTicks = FLEXABLE_MIN_LIT_TICKS + Math.floorMod(h, FLEXABLE_SPAN_TICKS);
+        long darkTicks = FLEXABLE_MIN_LIT_TICKS + Math.floorMod(h >>> 8, FLEXABLE_SPAN_TICKS);
+        long period = litTicks + darkTicks;
+        long phase = Math.floorMod(h >>> 16, period);
+        return Math.floorMod(gameTime + phase, period) < litTicks;
+    }
+
+    /**
      * 立刻按当前设置重算并写状态 —— 给「指令改完立即生效」用，绕开 5 tick 节流，
      * 也覆盖那些<b>已加载但不会 tick</b>（超出模拟距离）的方块。见 {@link LightIndex}。
      */
     public void refreshNow(ServerWorld world) {
+        LightConfig config = LightConfig.get(world);
         boolean night = isNight(world);
-        if (night && !nightLatched) {
-            // 还没锁存今晚：亮不亮根本没法算，交给下一次正常 tick 自己锁存
+        if (night && !nightLatched && !config.isYellowFlexableOn()) {
+            // 还没锁存今晚、且不是 flexable 模式：亮不亮根本没法算，交给下一次正常 tick 自己锁存。
+            // （flexable 不吃掷骰 / 延迟，所以不需要锁存，可以直接算。）
             return;
         }
-        LightConfig config = LightConfig.get(world);
         applyState(world, pos, evaluate(world, pos, config, night), config.getLightLevel());
     }
 
@@ -342,19 +382,20 @@ public class LightBlockEntity extends BlockEntity {
     /**
      * 第 {@code round}（≥1）轮这块亮不亮。
      *
-     * <p><b>{@code percent X} 已指定</b>：只在「**本晚被点亮**」的灯（{@code nightRoll}）里，
+     * <p><b>熄灭模式</b>（{@code /flex off}，出厂默认）：只在「**本晚被点亮**」的灯（{@code nightRoll}）里，
      * 每轮熄灭**当前还亮着**的 X%。被熄灭的不会自己再亮（只灭不亮），所以越到后半夜越暗；
      * 也绝不会点亮本晚原本没亮的灯。收尾见 {@link #flexEndRound}。
      *
-     * <p><b>未指定 percent</b>：对**全部**方块按 {@code /light percent} 重新分配一次
-     * 点亮 / 熄灭（有熄灭也有点亮）—— 对应「重新分配一次点亮/熄灭的灯」。
+     * <p><b>点亮模式</b>（{@code /flex on}）：对**全部**方块按 {@code /light percent} 重新分配一次
+     * 点亮 / 熄灭（有熄灭也有点亮）—— 对应「每 Y 秒点亮一次灯光方块」。
      *
+     * @param dir           {@link LightConfig#FLEX_DIR_LIGHT} = 点亮模式，其它 = 熄灭模式
      * @param nightLitCount 本晚第 0 轮的亮灯总数（由 {@link LightIndex} 数出来）
      */
     public static boolean flexRoundLit(BlockPos pos, long nightIndex, int round,
-                                       boolean nightRoll, int extinguishPercent, int percent,
+                                       boolean nightRoll, int dir, int extinguishPercent, int percent,
                                        int nightLitCount) {
-        if (extinguishPercent == LightConfig.YELLOW_FLEX_PERCENT_UNSET) {
+        if (dir == LightConfig.FLEX_DIR_LIGHT) {
             return rollsOnRound(pos, nightIndex, round, percent);
         }
         return nightRoll && (long) round < extinguishRound(pos, nightIndex, extinguishPercent, nightLitCount);

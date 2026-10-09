@@ -1,13 +1,13 @@
 """离线复核黄灯「夜间随机重分配」（/flex … 与 LightBlockEntity 的逐行 Python 复刻）。
 
-对应这一轮的需求：
+对应这一轮的需求（2026-10-09 定稿）：
   /light on|off            黄灯总开关
   /light h on|off          红灯总开关
-  /light -f on|off         全灭（黄/红一律不亮，无视一切设置）
-  /flex on time Y [percent X]  入夜第一次亮灯后每 Y 秒洗牌一次：
-                               给了 percent X ⇒ 本晚点亮的灯里每轮随机熄灭 X%（只越点越暗）
-                               没给 ⇒ 全部黄灯按 /light percent 重新分配点亮/熄灭
-  /flex off                关（一整夜只掷一次骰）
+  /light -f / lightall / alllight on|off   全灭（黄/红一律不亮，无视一切设置）
+  /flex off time Y [percent X]  熄灭模式（生效、出厂默认）：入夜第一次亮灯后每 Y 秒，
+                                在「本晚被点亮」的灯里熄灭当前还亮着的 X%（只越点越少）
+  /flex on  time Y [percent X]  点亮模式（生效）：全部黄灯按 /light percent 重新分配点亮/熄灭
+  /flex all off            彻底关闭 flex 功能（一整夜只掷一次骰）
   /flex flex X             每块 ±X 秒固定偏差（避免同一瞬间一起变）
   /flex grow X             每轮间隔递增：第 k 轮间隔 = Y + (k-1)·X（可负 -> 间隔变短）
 
@@ -16,11 +16,13 @@
      且带「间隔夹到 ≥1 tick」的短路版与朴素累计版结果完全一致；
   2. 第 0 轮 == 老的「今晚掷骰」（保证开了 flex 的第一次亮灯不变）；
   3. 第 ≥1 轮：同一块同一轮恒定（轮内不闪），不同轮结果不同（确实在洗牌）；
-  4. 亮灯规则：percent X -> 只在本晚点亮集里每轮熄灭「当前还亮着」的 X%（绝不点亮本晚没亮的，越点越暗）；
-     未指定 -> 全场按 /light percent 重新分配（有灭也有亮）；
+  4. 亮灯规则：熄灭模式 -> 只在本晚点亮集里每轮熄灭「当前还亮着」的 X%（绝不点亮本晚没亮的，越点越少）；
+     点亮模式 -> 全场按 /light percent 重新分配（有灭也有亮）；
   4e. 收尾：剩得不够一盏（n*X% < 1）时剩下的全灭，不会留零星鬼火；
   5. 偏差 jitter：确定性、落在 [-X, +X]、=0 时为 0；
-  6. 总开关：forceOff 或 !yellowOn 时恒不亮。
+  6. 总开关：forceOff 或 !yellowOn 时恒不亮；
+  7. 出厂默认（熄灭 60s/10%、点亮比例 20%）下，一整夜确实单调变暗并最终归零
+     —— 即用户要的「夜里不会亮一次就不熄灭」。
 
 跑法：python verify_flex.py
 """
@@ -39,6 +41,10 @@ CENTIS_PER_TICK = 5
 FLEX_ROUND_SALT = 0x464C45585F524E44       # "FLEX_RND"
 FLEX_JITTER_SALT = 0x464C45585F4A4954      # "FLEX_JIT"
 YELLOW_FLEX_PERCENT_UNSET = -1
+
+# 两个正交的开关（与 LightConfig 一致）：功能是否生效 + 方向
+FLEX_DIR_EXTINGUISH = 1                     # /flex off —— 熄灭模式（出厂默认）
+FLEX_DIR_LIGHT = 2                          # /flex on  —— 点亮模式
 
 
 # ------------------------------------------------------------------ 数值复刻
@@ -137,11 +143,17 @@ def extinguish_round(pos_long, night_index, extinguish_percent, night_lit_count)
     return min(draw, flex_end_round(night_lit_count, extinguish_percent))
 
 
-def flex_round_lit(pos_long, night_index, rnd, night_roll, extinguish, percent, night_lit_count=0):
-    """LightBlockEntity.flexRoundLit 的复刻（第 rnd ≥ 1 轮亮不亮）。"""
-    if extinguish == YELLOW_FLEX_PERCENT_UNSET:
+def flex_round_lit(pos_long, night_index, rnd, night_roll, direction, extinguish_percent, percent,
+                   night_lit_count=0):
+    """LightBlockEntity.flexRoundLit 的复刻（第 rnd ≥ 1 轮亮不亮）。
+
+    direction == FLEX_DIR_LIGHT  -> 点亮模式：全部黄灯按 /light percent 重新分配（有灭也有亮）
+    否则                          -> 熄灭模式：本晚点亮集里每轮熄灭还亮着的 X%（只灭不亮）
+    """
+    if direction == FLEX_DIR_LIGHT:
         return rolls_on_round(pos_long, night_index, rnd, percent)
-    return bool(night_roll) and rnd < extinguish_round(pos_long, night_index, extinguish, night_lit_count)
+    return bool(night_roll) and rnd < extinguish_round(pos_long, night_index, extinguish_percent,
+                                                       night_lit_count)
 
 
 def flex_jitter_ticks(pos_long, jitter):
@@ -214,13 +226,13 @@ def main():
         ok &= abs(lit - 50) < 0.6
 
     print("\n== 4. 第 ≥1 轮亮灯规则 ==")
-    # 4a. 未指定 percent -> 对全部方块按 /light percent 重新分配（含本晚原本没亮的）
+    # 4a. 点亮模式 -> 对全部方块按 /light percent 重新分配（含本晚原本没亮的）
     for p in (30, 50):
-        lit = sum(1 for q in sample if flex_round_lit(q, night, 1, False, YELLOW_FLEX_PERCENT_UNSET, p))
+        lit = sum(1 for q in sample if flex_round_lit(q, night, 1, False, FLEX_DIR_LIGHT, 0, p))
         got = lit / len(sample) * 100
-        print(f"  未指定 percent，/light percent={p} -> 全场亮 {got:6.2f}%（应 ~{p}%；本晚没亮的也会被点亮）")
+        print(f"  点亮模式，/light percent={p} -> 全场亮 {got:6.2f}%（应 ~{p}%；本晚没亮的也会被点亮）")
         ok &= abs(got - p) < 0.6
-    # 4b. 指定 percent X -> 本晚点亮集里累积熄灭，活过 R 轮 ≈ (1-X/100)^R
+    # 4b. 熄灭模式指定 percent X -> 本晚点亮集里累积熄灭，活过 R 轮 ≈ (1-X/100)^R
     night_lit = [q for q in sample if rolls_on(q, night, 30)]          # 本晚点亮集（P=30）
     print(f"  （本晚 30% 命中 => 点亮集 {len(night_lit)} / {len(sample)} = {len(night_lit) / len(sample) * 100:.1f}%）")
     for x in (0, 30, 50, 80, 100):
@@ -228,24 +240,25 @@ def main():
         nl = len(night_lit)
         line = [f"percent {x:>3}:"]
         for rnd in (1, 2, 3):
-            surv = sum(1 for p in night_lit if flex_round_lit(p, night, rnd, True, x, 30, nl))
+            surv = sum(1 for p in night_lit if flex_round_lit(p, night, rnd, True, FLEX_DIR_EXTINGUISH, x, 30, nl))
             frac = surv / len(night_lit) * 100 if night_lit else 0.0
             line.append(f"R{rnd}={frac:5.1f}%(理论 {q ** rnd * 100:5.1f}%)")
             if 0 < q < 1:
                 ok &= abs(frac - q ** rnd * 100) < 1.0
         print("  " + "  ".join(line))
-    # 4c. 关键不变式 1：指定 percent 时绝不会点亮「本晚原本没亮」的灯
+    # 4c. 关键不变式 1：熄灭模式绝不会点亮「本晚原本没亮」的灯
     nl = len(night_lit)
     leak = sum(1 for p in sample if (not rolls_on(p, night, 30))
-               and any(flex_round_lit(p, night, rnd, False, 50, 30, nl) for rnd in (1, 2, 3, 5)))
-    print(f"  「本晚没亮」的方块在后续轮次被点亮次数 = {leak}（应为 0）")
+               and any(flex_round_lit(p, night, rnd, False, FLEX_DIR_EXTINGUISH, 50, 30, nl)
+                       for rnd in (1, 2, 3, 5)))
+    print(f"  「本晚没亮」的方块在熄灭模式后续轮次被点亮次数 = {leak}（应为 0）")
     ok &= leak == 0
     # 4d. 关键不变式 2：越点越暗 —— 第 R+1 轮点亮集 ⊆ 第 R 轮点亮集
     nonmono = 0
     for p in night_lit:
         for rnd in (1, 2, 5, 9):
-            if (flex_round_lit(p, night, rnd + 1, True, 50, 30, nl)
-                    and not flex_round_lit(p, night, rnd, True, 50, 30, nl)):
+            if (flex_round_lit(p, night, rnd + 1, True, FLEX_DIR_EXTINGUISH, 50, 30, nl)
+                    and not flex_round_lit(p, night, rnd, True, FLEX_DIR_EXTINGUISH, 50, 30, nl)):
                 nonmono += 1
     print(f"  「下一轮亮了但本轮没亮」的方块次数 = {nonmono}（应为 0 = 单调变暗）")
     ok &= nonmono == 0
@@ -262,8 +275,10 @@ def main():
     # 用真实采样验证：到 R_end 轮时一个都不剩，且 R_end-1 轮还有灯
     for x in (20, 50):
         end = flex_end_round(nl, x)
-        alive_end = sum(1 for p in night_lit if flex_round_lit(p, night, end, True, x, 30, nl))
-        alive_before = sum(1 for p in night_lit if flex_round_lit(p, night, end - 1, True, x, 30, nl))
+        alive_end = sum(1 for p in night_lit
+                        if flex_round_lit(p, night, end, True, FLEX_DIR_EXTINGUISH, x, 30, nl))
+        alive_before = sum(1 for p in night_lit
+                           if flex_round_lit(p, night, end - 1, True, FLEX_DIR_EXTINGUISH, x, 30, nl))
         print(f"  采样 {nl} 盏 / X={x}: 第 {end - 1} 轮还剩 {alive_before} 盏，第 {end} 轮剩 {alive_end} 盏（应为 0）")
         ok &= alive_end == 0 and alive_before > 0
 
@@ -277,9 +292,9 @@ def main():
 
     print("\n== 6. 总开关：forceOff / !yellowOn 时恒不亮 ==")
     def final_lit(force_off, yellow_on, round_no, lp):
-        """复刻 LightBlockEntity.tick 的最终判定（round 用 lp=100 让「本应亮」成为确定事件）。"""
+        """复刻 LightBlockEntity.tick 的最终判定（用点亮模式 + lp=100 让「本应亮」成为确定事件）。"""
         want = round_no <= 0 or flex_round_lit(sample[0], night, round_no, True,
-                                               YELLOW_FLEX_PERCENT_UNSET, lp)
+                                               FLEX_DIR_LIGHT, 0, lp)
         want = bool(want)
         if force_off or not yellow_on:
             want = False
@@ -291,6 +306,31 @@ def main():
     ok &= final_lit(False, True, 2, 100) is True
     ok &= final_lit(True, True, 2, 100) is False
     ok &= final_lit(False, False, 2, 100) is False
+
+    print("\n== 7. 出厂默认（熄灭模式 60s / 10%、点亮比例 20%）→ 夜里灯确实越来越少直到全灭 ==")
+    night2 = 200
+    lit0 = [q for q in sample if rolls_on(q, night2, 20)]        # 入夜第一次亮灯（percent 20）
+    nl2 = len(lit0)
+    print(f"  入夜点亮 {nl2} / {len(sample)} = {nl2 / len(sample) * 100:.1f}%（percent 20）")
+    ok &= abs(nl2 / len(sample) * 100 - 20) < 0.6
+    interval = centis_to_ticks(6000)                             # 60s -> 1200 tick
+    end_round = flex_end_round(nl2, 10)                          # 理论「走到全灭」的轮次
+    timeline = []
+    for rnd in range(0, end_round + 1):
+        alive = nl2 if rnd == 0 else sum(
+            1 for p in lit0 if flex_round_lit(p, night2, rnd, True, FLEX_DIR_EXTINGUISH, 10, 20, nl2))
+        timeline.append(alive)
+        if rnd <= 14 or alive == 0 or rnd == end_round:
+            print(f"    第 {rnd:>2} 轮（入夜后 {rnd * interval / 20:6.1f} 秒）：还亮着 {alive:>5} / {nl2}")
+    print(f"  理论收尾轮次 = {end_round}；单调不增 = "
+          f"{all(timeline[i] >= timeline[i + 1] for i in range(len(timeline) - 1))}；"
+          f"最终归零 = {timeline[-1] == 0}")
+    ok &= all(timeline[i] >= timeline[i + 1] for i in range(len(timeline) - 1))
+    ok &= timeline[-1] == 0
+    # 每轮大约剩 90%（10% 熄灭）—— 第 1 轮就该掉掉 ~10%
+    drop1 = (nl2 - timeline[1]) / nl2 * 100 if nl2 else 0
+    print(f"  第 1 轮灭掉的占比 = {drop1:.1f}%（应 ≈10%）")
+    ok &= 5 < drop1 < 15
 
     print("\n结果:", "全部通过" if ok else "存在失败项")
     return 0 if ok else 1
